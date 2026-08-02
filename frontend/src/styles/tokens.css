@@ -1,0 +1,175 @@
+/* Design tokens.
+ *
+ * Palette is drawn from network monitoring instruments rather than code
+ * editors: the ink of an unlit rack, phosphor green reserved strictly for
+ * live/streaming state, and a plotter orange for anything the agent found.
+ * Colour is information here - if it is orange, the agent surfaced it.
+ */
+
+:root {
+  /* Base: a blue-slate, not black. There is real chroma in every surface,
+   * which is what keeps a dark UI from reading as a void. Each step lifts
+   * ~4% lightness so cards separate without needing heavy borders. */
+  --ink-900: #14181f;
+  --ink-850: #1a1f28;
+  --ink-800: #212733;
+  --ink-700: #2a313e;
+  --ink-600: #353d4c;
+  --ink-500: #454e60;
+
+  /* Type - warm-neutral against the cool base */
+  --text-hi: #f0f2f5;
+  --text-mid: #a8b2c1;
+  --text-lo: #7b8798;
+  --text-faint: #5b6675;
+
+  /* Iris - the primary. Structure, links, interactive affordance. */
+  --iris: #7c8cff;
+  --iris-soft: #a5b0ff;
+  --iris-dim: #3a4180;
+  --iris-glow: rgba(124, 140, 255, 0.14);
+
+  /* Phosphor - live/streaming state and successful recovery. */
+  --signal: #3ddc97;
+  --signal-dim: #1d6b4c;
+  --signal-glow: rgba(61, 220, 151, 0.16);
+
+  /* Plotter orange - the agent found something worth your attention. */
+  --find: #ff9b54;
+  --find-dim: #8a4a1c;
+  --find-glow: rgba(255, 155, 84, 0.14);
+
+  /* Severity. Verdict badge and timeline only. */
+  --sev-high: #ff5c72;
+  --sev-med: #ffc043;
+  --sev-low: #3ddc97;
+
+  /* Amber = recovering, not broken. That distinction is the whole feature. */
+  --heal: #e8b04b;
+  --heal-dim: #5c4519;
+
+  /* Type stack.
+   * Display: a grotesque with real character at large sizes.
+   * Mono: the working face - IPs, users, domains, all telemetry. */
+  --font-display: "Space Grotesk", "Inter", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", ui-monospace, monospace;
+
+  /* Scale - 1.25 minor third, floored at 16px for video legibility */
+  --t-xs: 0.75rem;
+  --t-sm: 0.8125rem;
+  --t-base: 0.9375rem;
+  --t-md: 1rem;
+  --t-lg: 1.25rem;
+  --t-xl: 1.75rem;
+  --t-2xl: 2.5rem;
+  --t-3xl: clamp(2.75rem, 7vw, 5.5rem);
+
+  /* Space - 4px base */
+  --s-1: 0.25rem;
+  --s-2: 0.5rem;
+  --s-3: 0.75rem;
+  --s-4: 1rem;
+  --s-5: 1.5rem;
+  --s-6: 2rem;
+  --s-7: 3rem;
+  --s-8: 4rem;
+  --s-9: 6rem;
+
+  --radius: 3px;
+  --radius-lg: 5px;
+
+  --rule: 1px solid var(--ink-600);
+  --rule-faint: 1px solid var(--ink-700);
+
+  --ease: cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  color: var(--text-hi);
+  font-family: var(--font-body);
+  font-size: var(--t-base);
+  line-height: 1.55;
+  font-feature-settings: "cv05" 1, "ss01" 1;
+
+  /* Two very low-opacity washes keep large empty areas from going flat.
+   * Fixed so they do not slide around while the trace pane scrolls. */
+  background-color: var(--ink-900);
+  background-image:
+    radial-gradient(60rem 40rem at 12% -10%, rgba(124, 140, 255, 0.09), transparent 60%),
+    radial-gradient(45rem 35rem at 100% 0%, rgba(255, 155, 84, 0.05), transparent 55%);
+  background-attachment: fixed;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  margin: 0;
+  line-height: 1.1;
+}
+
+a {
+  color: inherit;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  cursor: pointer;
+}
+
+/* Telemetry - every IP, user, host, domain wears this. Signals "security
+ * tool" faster than any amount of chrome. */
+.mono {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  letter-spacing: -0.01em;
+}
+
+/* Section eyebrow. Tracks wide, sits above headings. */
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: var(--t-xs);
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--text-lo);
+}
+
+:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: var(--find);
+  color: var(--ink-900);
+}
+
+/* Scrollbars - thin, dark, unobtrusive */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--ink-600);
+  border-radius: 99px;
+}
+::-webkit-scrollbar-thumb:hover { background: var(--ink-500); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
