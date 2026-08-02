@@ -89,17 +89,36 @@ def triage_node(state: AgentState):
             "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
         })
         
-    # Multimodal vishing integration
+    # Multimodal vishing integration via Groq Whisper fallback
     if state.get("audio"):
-        b64_audio = base64.b64encode(state["audio"]).decode("utf-8")
-        content.append({
-            "type": "input_audio",
-            "input_audio": {
-                "data": b64_audio,
-                "format": "wav"
-            }
-        })
-        state["emit"]({"type": "vishing", "risk_level": "Evaluating", "info": "Native audio processing started"})
+        state["emit"]({"type": "vishing", "risk_level": "Evaluating", "info": "Groq Whisper transcription started"})
+        
+        import os
+        from groq import Groq
+        
+        try:
+            groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY", ""))
+            # Write bytes to a temporary file since Groq expects a file object
+            import tempfile
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                f.write(state["audio"])
+                tmp_path = f.name
+                
+            with open(tmp_path, "rb") as audio_file:
+                transcription = groq_client.audio.transcriptions.create(
+                    file=("audio.wav", audio_file.read()),
+                    model="whisper-large-v3",
+                    response_format="json",
+                )
+            
+            transcript_text = transcription.text
+            os.remove(tmp_path)
+            
+            content[0]["text"] += f"\n\n[Audio Transcript]: {transcript_text}"
+            state["emit"]({"type": "vishing", "risk_level": "Evaluating", "info": f"Transcription complete: {transcript_text[:50]}..."})
+            
+        except Exception as e:
+            state["emit"]({"type": "error", "message": f"Whisper transcription failed: {str(e)}"})
 
     return {"messages": [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=content)]}
 

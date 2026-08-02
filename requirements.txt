@@ -14,3 +14,4 @@ langchain-core>=0.2.0
 # General Utilities
 requests
 pydantic
+groq
