@@ -5,7 +5,7 @@
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
   },
   "variable": [
-    { "key": "base_url", "value": "http://127.0.0.1:5001" },
+    { "key": "base_url", "value": "http://127.0.0.1:5000" },
     { "key": "job_id", "value": "" },
     { "key": "session_id", "value": "" }
   ],
@@ -32,10 +32,17 @@
                   "  pm.expect(Object.keys(h.subsystems).sort()).to.eql(['agent','backend','elastic','mcp']);",
                   "});",
                   "pm.test('backend itself is ok', () => pm.expect(h.subsystems.backend.status).to.eql('ok'));",
-                  "pm.test('never leaks the ES api key', () => {",
-                  "  pm.expect(JSON.stringify(h)).to.not.include('ES_API_KEY');",
+                  "pm.test('loaded the root .env, not a per-dir one', () => {",
+                  "  pm.expect(h.config.env_file).to.match(/SO\\/\\.env$/);",
                   "});",
-                  "console.log('mode:', h.config.mode, '| degraded:', h.degraded.join(', ') || 'none');"
+                  "pm.test('never leaks credential VALUES', () => {",
+                  "  const raw = JSON.stringify(h);",
+                  "  pm.expect(raw).to.not.include('sk-or-v1');",
+                  "  pm.expect(raw).to.not.match(/ELASTIC_API_KEY\\s*[:=]\\s*\\S/);",
+                  "});",
+                  "console.log('mode:', h.config.mode, '| degraded:', h.degraded.join(', ') || 'none');",
+                  "console.log('env :', h.config.env_file);",
+                  "console.log('creds: elastic=' + h.config.es_configured, 'gemma=' + h.config.gemma_configured);"
                 ]
               }
             }
@@ -241,7 +248,7 @@
             "method": "GET",
             "header": [{ "key": "Accept", "value": "text/event-stream" }],
             "url": { "raw": "{{base_url}}/api/stream/{{job_id}}", "host": ["{{base_url}}"], "path": ["api", "stream", "{{job_id}}"] },
-            "description": "The real frontend transport. Postman does not render SSE incrementally — it will hang until the stream closes, then dump everything, which defeats the point of looking at it.\n\nTest this with curl instead:\n\n  curl -N localhost:5001/api/stream/<job_id>\n\nEvents must trickle in over ~5 seconds. If they all appear at once, the trace pane cannot animate and the phase's whole deliverable is broken.\n\nA late subscriber gets the full backlog replayed first, so a slow browser never misses the early hop cards."
+            "description": "The real frontend transport. Postman does not render SSE incrementally — it will hang until the stream closes, then dump everything, which defeats the point of looking at it.\n\nTest this with curl instead:\n\n  curl -N localhost:5000/api/stream/<job_id>\n\nEvents must trickle in over ~5 seconds. If they all appear at once, the trace pane cannot animate and the phase's whole deliverable is broken.\n\nA late subscriber gets the full backlog replayed first, so a slow browser never misses the early hop cards."
           }
         },
         {

@@ -1,12 +1,18 @@
 """Central config. Everything that varies lives here, read from env with working defaults.
 
 Plan 05 Phase 4. Nothing else in the backend should call os.environ directly.
+
+There is ONE .env, at the repo root - shared by backend, Agent, mcp, and the
+data seeder. Do not add a backend/.env; four copies of a credential drift apart
+and the resulting "works for me" bug costs an hour to find.
 """
 import os
 
 from dotenv import load_dotenv
 
-load_dotenv()
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ENV_PATH = os.path.join(REPO_ROOT, ".env")
+load_dotenv(ENV_PATH)
 
 
 def env(key: str, default: str) -> str:
@@ -30,24 +36,28 @@ def env_int(key: str, default: int) -> int:
         return default
 
 
-# --- Elastic Cloud (contract: managed Elastic, not local Docker) ---
-ES_CLOUD_ID = env("ES_CLOUD_ID", "")
-ES_API_KEY = env("ES_API_KEY", "")
+# --- Elastic Cloud (managed; URL + API key, not cloud_id) ---
+ELASTIC_URL = env("ELASTIC_URL", "")
+ELASTIC_API_KEY = env("ELASTIC_API_KEY", "")
 ES_INDEX = env("ES_INDEX", "secops-logs-*")
 
 # --- MCP (contract §5: HTTP transport for a repo submission) ---
 MCP_MODE = env("MCP_MODE", "http")  # http | stdio
 MCP_URL = env("MCP_URL", "http://localhost:8000/mcp")
 
-# --- Gemma ---
-# NOTE: runtime still undecided (local Ollama vs hosted). Placeholder default.
-GEMMA_MODEL = env("GEMMA_MODEL", "gemma-4-12b-it")
-GEMMA_LOADED = False  # flipped by the agent module once a model is actually resident
+# --- Gemma (hosted via OpenRouter, per the root .env) ---
+GEMMA_API_KEY = env("GEMMA_API_KEY", "")
+GEMMA_MODEL = env("GEMMA_MODEL", "google/gemma-3-27b-it")
+GEMMA_BASE_URL = env("GEMMA_BASE_URL", "https://openrouter.ai/api/v1")
+GEMMA_LOADED = False  # flipped by agent_bridge once D's graph imports cleanly
 
 # --- Server ---
-PORT = env_int("PORT", 5001)  # 5000 is taken by macOS AirPlay Receiver
+# FLASK_PORT is the name used in the root .env; PORT overrides it for a one-off
+# run. Default is 5001 because macOS AirPlay Receiver squats on 5000 and answers
+# with a confusing 403 - if FLASK_PORT=5000 fails to bind, that is why.
+PORT = env_int("PORT", env_int("FLASK_PORT", 5001))
 HOST = env("HOST", "127.0.0.1")
-DEBUG = env_bool("DEBUG", True)
+DEBUG = env_bool("DEBUG", env("FLASK_ENV", "development") == "development")
 
 # Vite dev server origins. "*" is fine for a local demo; narrow it if the
 # backend is ever exposed beyond localhost.
@@ -78,11 +88,17 @@ def mode() -> str:
 
 
 def summary() -> dict:
-    """Non-secret config echo for /api/health. Never include ES_API_KEY."""
+    """Non-secret config echo for /api/health.
+
+    Reports only whether each credential is PRESENT. Never echo the key values -
+    /api/health is the one endpoint everyone screenshots during integration.
+    """
     return {
         "mode": mode(),
+        "env_file": ENV_PATH,
         "es_index": ES_INDEX,
-        "es_configured": bool(ES_CLOUD_ID and ES_API_KEY),
+        "es_configured": bool(ELASTIC_URL and ELASTIC_API_KEY),
+        "gemma_configured": bool(GEMMA_API_KEY),
         "mcp_mode": MCP_MODE,
         "mcp_url": MCP_URL,
         "gemma_model": GEMMA_MODEL,

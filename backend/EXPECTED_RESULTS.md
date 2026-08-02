@@ -1,15 +1,18 @@
 # Expected Results
 
 What every endpoint should return. All responses below were captured from a live
-run of this backend in **mock mode** (no Elastic, no MCP, no model) — that is the
-correct state until Teammates B, C, and D land.
+run of this backend in **mock mode** — no MCP server and no agent yet, which is
+the correct state until Teammates C and D land. Elastic credentials *are* loaded.
 
 ## Setup
 
 ```bash
 cd backend
-./run.sh                    # http://127.0.0.1:5001
+./run.sh                    # http://127.0.0.1:5000
 ```
+
+Config comes from the **single `.env` at the repo root** (`FLASK_PORT=5000`), not
+from `backend/.env` — there is deliberately no per-directory env file.
 
 Import `postman_collection.json`. Run **folder 2 top-to-bottom** — `Ask` saves
 `job_id` and `session_id` into collection variables, so every request below it
@@ -33,32 +36,43 @@ results (`Job status`, `Session findings`) need ~6s after `Ask`. Set
 {
   "ok": true,
   "ready": false,
-  "degraded": ["elastic", "mcp", "agent"],
+  "degraded": ["mcp", "agent"],
   "uptime_s": 4.3,
   "subsystems": {
-    "elastic": { "status": "not_configured", "detail": "ES_CLOUD_ID / ES_API_KEY unset" },
+    "elastic": { "status": "configured", "index": "secops-logs-*",
+                 "host": "my-security-project-b0f7f7.es.asia-south1.gcp.elastic.cloud",
+                 "detail": "credentials present; queries go through MCP, not Flask" },
     "mcp":     { "status": "stub", "mode": "http", "url": "http://localhost:8000/mcp",
                  "detail": "serving contract-shaped stub data" },
-    "agent":   { "status": "mock", "backend": "mock", "model": "gemma-4-12b-it" },
+    "agent":   { "status": "mock", "backend": "mock",
+                 "model": "google/gemma-3-27b-it", "api_key_present": true },
     "backend": { "status": "ok" }
   },
-  "config": { "mode": "mock", "es_configured": false, "...": "..." },
+  "config": { "mode": "mock", "env_file": "/…/SO/.env",
+              "es_configured": true, "gemma_configured": true, "port": 5000 },
   "replay": { "enabled": false },
   "jobs": 0,
   "sessions": 0
 }
 ```
 
-**`ready: false` with three degraded subsystems is the correct answer right now** —
-it is honest reporting, not a failure. As teammates land, each flips to `ok`:
+**`ready: false` with `mcp` and `agent` degraded is the correct answer right now** —
+honest reporting, not a failure. `elastic` already reads `configured` because the
+root `.env` has real credentials.
 
 | Subsystem | Becomes `ok` when |
 |---|---|
-| `elastic` | `ES_CLOUD_ID` + `ES_API_KEY` are set in `.env` |
+| `elastic` | ✅ already — `ELASTIC_URL` + `ELASTIC_API_KEY` are set |
 | `mcp` | C's FastMCP server answers at `MCP_URL` |
 | `agent` | `Agent/graph.py` exists and exposes `run()` |
 
-`config` never contains `ES_API_KEY` — the collection asserts this.
+**Config comes from one `.env` at the repo root**, not `backend/.env` — `env_file`
+in the response tells you exactly which file was loaded, which settles "did it
+pick up my key?" in one request.
+
+`config` reports only whether each credential is **present** (`es_configured`,
+`gemma_configured`, `api_key_present`) and never echoes a key value. This is the
+one endpoint everyone screenshots during integration, so verify it stays that way.
 
 ---
 
@@ -193,7 +207,7 @@ Omit `"stream": false` for the streamed job/queue path (`sigma_drafting` →
 **Test with curl, not Postman:**
 
 ```bash
-curl -N localhost:5001/api/stream/<job_id>
+curl -N localhost:5000/api/stream/<job_id>
 ```
 
 ```
@@ -329,14 +343,14 @@ never swept** — `remaining` counts those still in flight.
 ## Quick sanity script
 
 ```bash
-curl -s localhost:5001/api/health | python3 -m json.tool
+curl -s localhost:5000/api/health | python3 -m json.tool
 
-JOB=$(curl -s -X POST localhost:5001/api/ask \
+JOB=$(curl -s -X POST localhost:5000/api/ask \
   -H 'Content-Type: application/json' \
   -d '{"question":"What IPs seem malicious today and why?"}' \
   | python3 -c 'import sys,json;print(json.load(sys.stdin)["job_id"])')
 
-curl -N localhost:5001/api/stream/$JOB
+curl -N localhost:5000/api/stream/$JOB
 ```
 
 If those three commands work and the events **trickle** rather than dump, the

@@ -35,13 +35,7 @@ trap 'kill $SERVER_PID 2>/dev/null || true' EXIT INT TERM
 for _ in $(seq 1 30); do
   if curl -sf "http://${HOST}:${PORT}/api/health" >/dev/null 2>&1; then
     echo "==> up. subsystem status:"
-    curl -s "http://${HOST}:${PORT}/api/health" \
-      | ./venv/bin/python -c 'import sys,json
-h=json.load(sys.stdin)
-for name, s in h["subsystems"].items():
-    mark = "OK  " if s["status"] in ("ok","configured") else "STUB"
-    print(f"    [{mark}] {name:9s} {s[\"status\"]}")
-print(f"    mode={h[\"config\"][\"mode\"]}  ready={h[\"ready\"]}")'
+    ./venv/bin/python healthcheck.py
     echo ""
     echo "    health:  http://${HOST}:${PORT}/api/health"
     echo "    ask:     POST http://${HOST}:${PORT}/api/ask"

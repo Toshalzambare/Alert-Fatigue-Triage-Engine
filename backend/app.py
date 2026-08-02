@@ -34,6 +34,8 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
 )
 log = logging.getLogger("backend")
+# urllib3 logs a line per MCP probe; at DEBUG that buries our own output.
+logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = config.MAX_UPLOAD_MB * 1024 * 1024
@@ -46,10 +48,12 @@ BOOT_TIME = time.time()
 
 # ---------------------------------------------------------------- probes ---
 def probe_es() -> dict:
-    """Teammate B's Elastic Cloud."""
-    if not (config.ES_CLOUD_ID and config.ES_API_KEY):
-        return {"status": "not_configured", "detail": "ES_CLOUD_ID / ES_API_KEY unset"}
-    return {"status": "configured", "index": config.ES_INDEX,
+    """Teammate B's Elastic Cloud. Credentials come from the root .env."""
+    if not (config.ELASTIC_URL and config.ELASTIC_API_KEY):
+        return {"status": "not_configured",
+                "detail": f"ELASTIC_URL / ELASTIC_API_KEY unset in {config.ENV_PATH}"}
+    host = config.ELASTIC_URL.split("//")[-1].split(":")[0]
+    return {"status": "configured", "index": config.ES_INDEX, "host": host,
             "detail": "credentials present; queries go through MCP, not Flask"}
 
 
@@ -65,12 +69,14 @@ def probe_mcp() -> dict:
 
 
 def probe_agent() -> dict:
-    """Teammate D's graph."""
+    """Teammate D's graph. Gemma is hosted (OpenRouter), so "configured" means
+    an API key is present rather than a model being resident in VRAM."""
     backend = agent_bridge.active_backend()
     return {
         "status": "ok" if backend == "live" else backend,
         "backend": backend,
         "model": config.GEMMA_MODEL,
+        "api_key_present": bool(config.GEMMA_API_KEY),
     }
 
 
