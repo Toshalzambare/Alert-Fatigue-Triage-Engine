@@ -1,0 +1,54 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  labels:
+    app: triage
+    tier: web
+spec:
+  type: LoadBalancer
+  ports:
+    - port: 5000
+      targetPort: 5000
+  selector:
+    app: triage
+    tier: web
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  labels:
+    app: triage
+    tier: web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: triage
+      tier: web
+  template:
+    metadata:
+      labels:
+        app: triage
+        tier: web
+    spec:
+      containers:
+        - name: api
+          image: gcr.io/YOUR_PROJECT_ID/triage-backend:latest
+          imagePullPolicy: Always
+          command: ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--threads", "4", "--chdir", "backend", "app:app"]
+          ports:
+            - containerPort: 5000
+          env:
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+            - name: MCP_URL
+              value: "http://mcp:8000/mcp"
+          envFrom:
+            - secretRef:
+                name: triage-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi

@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:alpine
+    container_name: triage-redis
+    ports:
+      - "6379:6379"
+    restart: always
+
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    container_name: triage-mcp
+    ports:
+      - "8000:8000"
+    restart: always
+    env_file:
+      - .env
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: triage-api
+    command: gunicorn --bind 0.0.0.0:5000 --workers 2 --threads 4 --chdir backend app:app
+    ports:
+      - "5000:5000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - MCP_URL=http://mcp:8000/mcp
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - mcp
+    restart: always
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: triage-worker
+    command: celery -A backend.tasks worker --loglevel=info --concurrency=2
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - MCP_URL=http://mcp:8000/mcp
+    env_file:
+      - .env
+    depends_on:
+      - redis
+      - mcp
+    restart: always

@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  labels:
+    app: triage
+    tier: background
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: triage
+      tier: background
+  template:
+    metadata:
+      labels:
+        app: triage
+        tier: background
+    spec:
+      containers:
+        - name: worker
+          image: gcr.io/YOUR_PROJECT_ID/triage-backend:latest
+          imagePullPolicy: Always
+          command: ["celery", "-A", "backend.tasks", "worker", "--loglevel=info", "--concurrency=2"]
+          env:
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+            - name: MCP_URL
+              value: "http://mcp:8000/mcp"
+          envFrom:
+            - secretRef:
+                name: triage-secrets
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi

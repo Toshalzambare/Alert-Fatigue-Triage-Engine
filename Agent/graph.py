@@ -28,7 +28,8 @@ class AgentState(TypedDict):
 # 2. Helpers
 # -----------------------------------------------------------------------------
 
-MCP_URL = "http://localhost:8000/mcp"
+import os
+MCP_URL = os.getenv("MCP_URL", "http://localhost:8000/mcp")
 
 def call_mcp_tool(tool_name: str, args: dict) -> dict:
     try:

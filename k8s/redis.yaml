@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  labels:
+    app: triage
+    tier: message-broker
+spec:
+  ports:
+    - port: 6379
+      targetPort: 6379
+  selector:
+    app: triage
+    tier: message-broker
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  labels:
+    app: triage
+    tier: message-broker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: triage
+      tier: message-broker
+  template:
+    metadata:
+      labels:
+        app: triage
+        tier: message-broker
+    spec:
+      containers:
+        - name: redis
+          image: redis:alpine
+          ports:
+            - containerPort: 6379
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
