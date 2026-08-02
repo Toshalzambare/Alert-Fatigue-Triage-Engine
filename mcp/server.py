@@ -1,6 +1,6 @@
 import threading
 import uvicorn
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from starlette.applications import Starlette
 from starlette.responses import JSONResponse
 from starlette.routing import Route, Mount
