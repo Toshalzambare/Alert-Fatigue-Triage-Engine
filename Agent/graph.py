@@ -16,6 +16,7 @@ from gemma_client import get_bound_llm, parse_tool_calls, get_llm
 class AgentState(TypedDict):
     question: str
     image: bytes | None
+    audio: bytes | None
     messages: Annotated[list, add_messages]
     tool_calls: list
     findings: dict
@@ -69,14 +70,38 @@ def _check_injection(result) -> bool:
 # 3. Nodes
 # -----------------------------------------------------------------------------
 
+import base64
+
 def triage_node(state: AgentState):
-    state["emit"]({"type": "triage", "intent": "investigate", "entities": [state["question"]]})
+    question = state["question"]
+    state["emit"]({"type": "triage", "intent": "investigate", "entities": [question]})
+    
+    content = [{"type": "text", "text": question}]
+    
     # Multimodal phishing integration
-    if state["image"]:
+    if state.get("image"):
         state["emit"]({"type": "vision", "brand_impersonated": "Unknown", "extracted_domain": "micros0ft-verify.co", "red_flags": ["Zero instead of O"]})
-        state["question"] += " Ensure you check the domain micros0ft-verify.co"
+        content[0]["text"] += " Ensure you check the domain micros0ft-verify.co"
+        # Include native image payload
+        b64_image = base64.b64encode(state["image"]).decode("utf-8")
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64_image}"}
+        })
         
-    return {"messages": [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=state["question"])]}
+    # Multimodal vishing integration
+    if state.get("audio"):
+        b64_audio = base64.b64encode(state["audio"]).decode("utf-8")
+        content.append({
+            "type": "input_audio",
+            "input_audio": {
+                "data": b64_audio,
+                "format": "wav"
+            }
+        })
+        state["emit"]({"type": "vishing", "risk_level": "Evaluating", "info": "Native audio processing started"})
+
+    return {"messages": [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=content)]}
 
 def plan_tool_node(state: AgentState):
     llm = get_bound_llm()
@@ -228,10 +253,11 @@ def warm_up():
     global _llm
     _llm = get_bound_llm()
 
-def run(question: str, emit, image: bytes | None = None, session=None) -> dict:
+def run(question: str, emit, image: bytes | None = None, audio: bytes | None = None, session=None) -> dict:
     state = {
         "question": question,
         "image": image,
+        "audio": audio,
         "messages": [],
         "tool_calls": [],
         "findings": {},

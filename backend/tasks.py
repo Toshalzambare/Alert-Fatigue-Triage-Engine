@@ -53,7 +53,7 @@ def _emitter(job_id: str):
 
 
 @celery_app.task(name="sentinel.run_agent", bind=True)
-def run_agent(self, job_id: str, question: str, image_b64: str | None = None):
+def run_agent(self, job_id: str, question: str, image_b64: str | None = None, audio_b64: str | None = None):
     """Run one investigation end to end.
 
     Always publishes a terminal event. A worker that dies without one would
@@ -70,10 +70,19 @@ def run_agent(self, job_id: str, question: str, image_b64: str | None = None):
             image = base64.b64decode(image_b64)
         except Exception:  # noqa: BLE001
             emit({"type": "error", "message": "could not decode uploaded image"})
+            
+    audio = None
+    if audio_b64:
+        import base64
+
+        try:
+            audio = base64.b64decode(audio_b64)
+        except Exception:  # noqa: BLE001
+            emit({"type": "error", "message": "could not decode uploaded audio"})
 
     try:
         agent = _load_agent()
-        result = agent.run(question, emit=emit, image=image)
+        result = agent.run(question, emit=emit, image=image, audio=audio)
 
         set_state(
             job_id,

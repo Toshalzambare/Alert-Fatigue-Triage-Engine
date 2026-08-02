@@ -115,11 +115,11 @@ def health():
 
 
 # ------------------------------------------------------------------- ask ---
-def _enqueue(question: str, session_id: str | None, image_b64: str | None = None):
+def _enqueue(question: str, session_id: str | None, image_b64: str | None = None, audio_b64: str | None = None):
     sid, _ = get_session(session_id)
     job_id = uuid.uuid4().hex
     bus.set_state(job_id, status="queued", question=question, session_id=sid)
-    run_agent.delay(job_id, question, image_b64)
+    run_agent.delay(job_id, question, image_b64, audio_b64)
     log.info("job %s queued: %r", job_id[:8], question[:60])
     return job_id, sid
 
@@ -178,10 +178,52 @@ def upload():
         return jsonify({"error": "not a valid image", "detail": str(exc)}), 400
 
     question = question or "Did anyone click this?"
-    job_id, sid = _enqueue(question, session_id, base64.b64encode(raw).decode())
+    job_id, sid = _enqueue(question, session_id, image_b64=base64.b64encode(raw).decode())
     return jsonify({
         "job_id": job_id, "session_id": sid, "status": "queued",
         "image": {"format": fmt, "width": size[0], "height": size[1], "bytes": len(raw)},
+    })
+
+
+@app.post("/api/audio")
+def audio():
+    """Native Multimodal Audio entry point.
+    Accepts an audio file and passes the raw bytes directly to the agent.
+    """
+    question = ""
+    raw: bytes | None = None
+    session_id = None
+    b64 = None
+
+    if "audio" in request.files:
+        fh = request.files["audio"]
+        raw = fh.read()
+        b64 = base64.b64encode(raw).decode("utf-8")
+        question = (request.form.get("question") or "").strip()
+        session_id = request.form.get("session_id")
+    else:
+        payload = request.get_json(silent=True) or {}
+        b64 = payload.get("audio_base64") or ""
+        question = (payload.get("question") or "").strip()
+        session_id = payload.get("session_id")
+        if b64:
+            if "," in b64[:64]:
+                b64 = b64.split(",", 1)[1]
+            try:
+                raw = base64.b64decode(b64, validate=True)
+            except Exception:  # noqa: BLE001
+                return jsonify({"error": "audio_base64 is not valid base64"}), 400
+
+    if not raw or not b64:
+        return jsonify({"error": "no audio provided"}), 400
+
+    question = question or "Analyze this audio. If it's a voice command, execute it. If it's a voicemail/call recording, check it for social engineering/phishing indicators."
+    
+    job_id, sid = _enqueue(question, session_id, audio_b64=b64)
+    return jsonify({
+        "job_id": job_id, "session_id": sid, "status": "queued",
+        "input_type": "audio",
+        "audio": {"bytes": len(raw)}
     })
 
 
