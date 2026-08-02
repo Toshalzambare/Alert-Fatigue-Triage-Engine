@@ -68,7 +68,7 @@ export default function Landing({ onEnter }) {
     <div className="landing">
       <header className="nav">
         <span className="wordmark">
-          Sentinel<span className="wordmark-dot">.</span>
+          Dossier<span className="wordmark-dot">.</span>
         </span>
         <nav className="nav-links">
           <a href="#capabilities">Capabilities</a>
