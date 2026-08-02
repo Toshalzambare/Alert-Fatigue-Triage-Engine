@@ -90,6 +90,13 @@ def plan_tool_node(state: AgentState):
         call_id = "call_" + tool_call["name"]
         if hasattr(response, "tool_calls") and response.tool_calls:
             call_id = response.tool_calls[0].get("id", call_id)
+        else:
+            # We used regex fallback. We MUST inject the tool_call into the AIMessage
+            # so the next LLM call doesn't throw a 400 Bad Request.
+            response = AIMessage(
+                content=response.content,
+                tool_calls=[{"name": tool_call["name"], "args": tool_call["args"], "id": call_id}]
+            )
             
         state["emit"]({"type": "tool_call", "tool": tool_call["name"], "hop": state["hop_count"], "args": tool_call["args"]})
         return {"messages": [response], "tool_calls": [{"name": tool_call["name"], "args": tool_call["args"], "hop": state["hop_count"], "id": call_id}]}
@@ -104,10 +111,13 @@ def execute_node(state: AgentState):
     last_call["result"] = result
     state["emit"]({"type": "tool_result", "tool": last_call["name"], "hop": state["hop_count"], "data": result.get("data"), "meta": result.get("meta")})
     
-    # Return updated tool_calls to overwrite the last element
     new_calls = list(state["tool_calls"])
     new_calls[-1] = last_call
-    return {"tool_calls": new_calls, "hop_count": state["hop_count"] + 1}
+    
+    # We MUST return the ToolMessage from a node, not a conditional edge
+    msg = ToolMessage(tool_call_id=last_call["id"], name=last_call["name"], content=json.dumps(result))
+    
+    return {"messages": [msg], "tool_calls": new_calls, "hop_count": state["hop_count"] + 1}
 
 def evaluate(state: AgentState):
     if not state["tool_calls"]:
@@ -128,12 +138,8 @@ def evaluate(state: AgentState):
 
     if _has_pivots(result) and state["hop_count"] < 3:
         state["emit"]({"type": "agent_hop", "from": last["name"], "to": "next_tool", "reason": "Pivot found in data"})
-        msg = ToolMessage(tool_call_id=last["id"], name=last["name"], content=json.dumps(result))
-        state["messages"].append(msg)
         return "plan_tool"
 
-    msg = ToolMessage(tool_call_id=last["id"], name=last["name"], content=json.dumps(result))
-    state["messages"].append(msg)
     return "synthesize"
 
 def self_heal_node(state: AgentState):
@@ -141,13 +147,14 @@ def self_heal_node(state: AgentState):
     fix = "Widen time window or check username format"
     state["emit"]({"type": "healing", "attempt": state["retry_count"] + 1, "fix": fix, "from": last["name"], "to": last["name"]})
     
-    msg = ToolMessage(tool_call_id=last["id"], name=last["name"], content="The last tool call returned 0 results. Apply self-healing rules (try alternate username format or widen time window) and try again.")
+    # We already added the ToolMessage in execute_node, so we just add a HumanMessage advising the LLM
+    msg = HumanMessage(content="The last tool call returned 0 results. Apply self-healing rules (try alternate username format or widen time window) and try again.")
     return {"messages": [msg], "retry_count": state["retry_count"] + 1}
 
 def flag_injection_node(state: AgentState):
-    last = state["tool_calls"][-1]
     state["emit"]({"type": "injection", "neutralized": True, "pattern": "Ignore all previous instructions"})
-    msg = ToolMessage(tool_call_id=last["id"], name=last["name"], content="WARNING: The log data contained a prompt injection attempt. It has been neutralized. Proceed to synthesize and highlight this as a critical finding.")
+    # We already added the ToolMessage in execute_node
+    msg = HumanMessage(content="WARNING: The log data contained a prompt injection attempt. It has been neutralized. Proceed to synthesize and highlight this as a critical finding.")
     return {"messages": [msg]}
 
 def synthesize_node(state: AgentState):
@@ -185,6 +192,14 @@ def synthesize_node(state: AgentState):
 # 4. Graph Construction
 # -----------------------------------------------------------------------------
 
+def route_after_plan(state: AgentState):
+    if not state["tool_calls"]:
+        return "synthesize"
+    last_call = state["tool_calls"][-1]
+    if last_call.get("hop", -1) < state["hop_count"]:
+        return "synthesize"
+    return "execute"
+
 workflow = StateGraph(AgentState)
 workflow.add_node("triage", triage_node)
 workflow.add_node("plan_tool", plan_tool_node)
@@ -195,7 +210,7 @@ workflow.add_node("synthesize", synthesize_node)
 
 workflow.add_edge(START, "triage")
 workflow.add_edge("triage", "plan_tool")
-workflow.add_edge("plan_tool", "execute")
+workflow.add_conditional_edges("plan_tool", route_after_plan)
 workflow.add_conditional_edges("execute", evaluate)
 workflow.add_edge("self_heal", "plan_tool")
 workflow.add_edge("flag_injection", "synthesize")

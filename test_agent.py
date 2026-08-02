@@ -14,6 +14,14 @@ def mock_emit(event):
 
 if __name__ == "__main__":
     graph.warm_up()
-    print("Agent warmed up. Running Q1...")
-    res = graph.run("What IPs seem malicious today and why?", mock_emit)
-    print("VERDICT:", res["verdict"])
+    print("\n=== TEST 1: Timeline Around (15 min) ===")
+    res1 = graph.run("Show me what happened 15 minutes before and after the vpn-gw-01 incident", mock_emit)
+    
+    print("\n=== TEST 2: SOC Analyst Report Generation ===")
+    res2 = graph.run("Write a SOC analyst report for the a.patel impossible travel incident", mock_emit)
+    
+    print("\n=== TEST 3: Multimodal Phishing Image ===")
+    # Simulate an image upload by passing dummy bytes
+    res3 = graph.run("Can you check if anyone visited the domain in this image?", mock_emit, image=b"fake_image_bytes")
+    
+    print("\n=== ALL TESTS FINISHED ===")
