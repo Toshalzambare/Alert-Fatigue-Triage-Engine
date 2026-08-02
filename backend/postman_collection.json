@@ -1,0 +1,548 @@
+{
+  "info": {
+    "name": "SecOps Agent — Flask Backend",
+    "description": "Autonomous Security Agent backend (plan 05, all phases).\n\nRun requests top-to-bottom. Folder 2 (Core Demo Flow) chains automatically: `ask` captures `job_id` and `session_id` into collection variables, so Timeline and Sigma resolve their context with an empty body — exactly as the frontend will.\n\nSee EXPECTED_RESULTS.md for what each response should look like.\n\nNOTE: Postman does not render SSE. `/api/stream/:job_id` will sit open and show the raw stream; use the Polling Fallback request instead to inspect events as JSON.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://127.0.0.1:5001" },
+    { "key": "job_id", "value": "" },
+    { "key": "session_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Health",
+      "item": [
+        {
+          "name": "Health check",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/health", "host": ["{{base_url}}"], "path": ["api", "health"] },
+            "description": "The integration dashboard. Tells you which of the four subsystems is down, in one second, instead of four people guessing.\n\nBefore C and D land, elastic/mcp/agent all read `stub` or `not_configured` — that is correct and honest, not a failure."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const h = pm.response.json();",
+                  "pm.test('reports four subsystems', () => {",
+                  "  pm.expect(Object.keys(h.subsystems).sort()).to.eql(['agent','backend','elastic','mcp']);",
+                  "});",
+                  "pm.test('backend itself is ok', () => pm.expect(h.subsystems.backend.status).to.eql('ok'));",
+                  "pm.test('never leaks the ES api key', () => {",
+                  "  pm.expect(JSON.stringify(h)).to.not.include('ES_API_KEY');",
+                  "});",
+                  "console.log('mode:', h.config.mode, '| degraded:', h.degraded.join(', ') || 'none');"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Core Demo Flow (run in order)",
+      "item": [
+        {
+          "name": "Ask — Q1 malicious IPs",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"What IPs seem malicious today and why?\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/ask", "host": ["{{base_url}}"], "path": ["api", "ask"] },
+            "description": "Demo question 1 — the track's literal example. Returns immediately with a job_id; the run continues in a worker thread.\n\nSaves job_id and session_id to collection variables for every request below."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('returns job_id', () => pm.expect(r.job_id).to.be.a('string'));",
+                  "pm.test('returns session_id', () => pm.expect(r.session_id).to.be.a('string'));",
+                  "pm.test('status is running', () => pm.expect(r.status).to.eql('running'));",
+                  "pm.collectionVariables.set('job_id', r.job_id);",
+                  "pm.collectionVariables.set('session_id', r.session_id);",
+                  "console.log('job:', r.job_id.slice(0,8), '| session:', r.session_id.slice(0,8));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Poll events (readable JSON)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/events/{{job_id}}?since=0",
+              "host": ["{{base_url}}"],
+              "path": ["api", "events", "{{job_id}}"],
+              "query": [{ "key": "since", "value": "0" }]
+            },
+            "description": "Use this instead of SSE inside Postman — same events, as plain JSON.\n\nThe run takes ~5s at the default 300ms pacing. Send this immediately after Ask to catch it mid-run (status: running), or wait ~6s for the full 18 events.\n\n`since=N` is a cursor: pass back `next_since` to fetch only what is new."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "const types = d.events.map(e => e.type);",
+                  "console.log('status:', d.status, '| events:', d.events.length);",
+                  "console.log('types:', types.join(' -> '));",
+                  "pm.test('seq numbers are unique and ordered', () => {",
+                  "  const s = d.events.map(e => e.seq);",
+                  "  pm.expect(s).to.eql([...s].sort((a,b) => a-b));",
+                  "  pm.expect(new Set(s).size).to.eql(s.length);",
+                  "});",
+                  "if (d.status === 'done') {",
+                  "  pm.test('emitted a verdict', () => pm.expect(types).to.include('verdict'));",
+                  "  pm.test('emitted tool calls', () => pm.expect(types).to.include('tool_call'));",
+                  "  pm.test('emitted autonomous hops', () => pm.expect(types).to.include('agent_hop'));",
+                  "  pm.test('emitted a self-healing retry', () => pm.expect(types).to.include('healing'));",
+                  "} else {",
+                  "  console.log('still running — re-send in a few seconds for the full set');",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Job status + final result",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/job/{{job_id}}", "host": ["{{base_url}}"], "path": ["api", "job", "{{job_id}}"] },
+            "description": "Status, event count, and the agent's final result object. Wait ~6s after Ask for status to read `done`."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const j = pm.response.json();",
+                  "console.log('status:', j.status, '| events:', j.event_count);",
+                  "if (j.status === 'done') {",
+                  "  pm.test('carries a verdict', () => pm.expect(j.result.verdict).to.be.an('object'));",
+                  "  pm.test('verdict severity is high', () => pm.expect(j.result.verdict.severity).to.eql('high'));",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Session findings",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/session/{{session_id}}", "host": ["{{base_url}}"], "path": ["api", "session", "{{session_id}}"] },
+            "description": "What the analyst has found so far. This is how Timeline and Sigma know 'what did we just find' without an NL round-trip.\n\nMust contain 45.133.1.88 after the Ask above."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json();",
+                  "pm.test('captured findings', () => pm.expect(s.findings).to.not.be.empty);",
+                  "pm.test('found the malicious IP', () => {",
+                  "  pm.expect(JSON.stringify(s.findings)).to.include('45.133.1.88');",
+                  "});",
+                  "console.log('findings:', JSON.stringify(s.findings));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Timeline (Inspect Timeline button)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"session_id\": \"{{session_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/api/timeline", "host": ["{{base_url}}"], "path": ["api", "timeline"] },
+            "description": "Bypasses the LLM entirely — calls C's timeline_around() directly. No agent, no streaming, ~200ms. Fast and unbreakable is what you want behind a button a judge clicks.\n\nWith only session_id in the body, the anchor and host resolve from the session's findings. That is the real frontend path."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json().data;",
+                  "pm.test('resolved anchor from session', () => pm.expect(d.anchor).to.be.a('string'));",
+                  "pm.test('has before and after phases', () => {",
+                  "  pm.expect(d.before).to.be.an('array');",
+                  "  pm.expect(d.after).to.be.an('array');",
+                  "});",
+                  "pm.test('computes new_categories_after', () => {",
+                  "  pm.expect(d.summary.new_categories_after).to.be.an('array');",
+                  "});",
+                  "console.log('anchor:', d.anchor, '| before:', d.before.length, 'after:', d.after.length);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Sigma forge (sync)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"session_id\": \"{{session_id}}\",\n  \"stream\": false\n}" },
+            "url": { "raw": "{{base_url}}/api/sigma", "host": ["{{base_url}}"], "path": ["api", "sigma"] },
+            "description": "Demo question 5. Drafts a Sigma rule from the session's findings, converts detection: to an ES query in Python (never the LLM), then validates it against history.\n\nThe validation is the differentiator: it turns 'I wrote a rule' into 'I wrote a rule and proved it is 1.6% FP'.\n\n`stream: false` returns synchronously — easier to read in Postman. Omit it for the streamed job/queue path."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const s = pm.response.json();",
+                  "pm.test('produced Sigma YAML', () => pm.expect(s.yaml).to.include('title:'));",
+                  "pm.test('converted to an ES query', () => pm.expect(s.es_query.query).to.be.an('object'));",
+                  "pm.test('never emits a match_all rule', () => {",
+                  "  pm.expect(JSON.stringify(s.es_query)).to.not.include('match_all');",
+                  "});",
+                  "pm.test('reports a validated FP rate', () => {",
+                  "  pm.expect(s.validation).to.have.property('fp_rate');",
+                  "});",
+                  "console.log(s.headline);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Streaming",
+      "item": [
+        {
+          "name": "SSE stream (browser/curl, not Postman)",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Accept", "value": "text/event-stream" }],
+            "url": { "raw": "{{base_url}}/api/stream/{{job_id}}", "host": ["{{base_url}}"], "path": ["api", "stream", "{{job_id}}"] },
+            "description": "The real frontend transport. Postman does not render SSE incrementally — it will hang until the stream closes, then dump everything, which defeats the point of looking at it.\n\nTest this with curl instead:\n\n  curl -N localhost:5001/api/stream/<job_id>\n\nEvents must trickle in over ~5 seconds. If they all appear at once, the trace pane cannot animate and the phase's whole deliverable is broken.\n\nA late subscriber gets the full backlog replayed first, so a slow browser never misses the early hop cards."
+          }
+        },
+        {
+          "name": "Polling fallback with cursor",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/events/{{job_id}}?since=5",
+              "host": ["{{base_url}}"],
+              "path": ["api", "events", "{{job_id}}"],
+              "query": [{ "key": "since", "value": "5" }]
+            },
+            "description": "Plan 05's option 3 — less elegant than SSE, never fails. Returns only events at or after sequence N, so the frontend can poll without re-processing."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const d = pm.response.json();",
+                  "pm.test('cursor skips earlier events', () => {",
+                  "  d.events.forEach(e => pm.expect(e.seq).to.be.at.least(5));",
+                  "});",
+                  "console.log('from seq 5:', d.events.length, 'events | next_since:', d.next_since);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Multimodal Upload",
+      "item": [
+        {
+          "name": "Upload phishing screenshot (multipart)",
+          "request": {
+            "method": "POST",
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                { "key": "image", "type": "file", "src": [], "description": "Pick any PNG/JPG. For the real demo use the fake M365 login with the micros0ft-verify.co URL bar." },
+                { "key": "question", "value": "Did anyone click this?", "type": "text" }
+              ]
+            },
+            "url": { "raw": "{{base_url}}/api/upload", "host": ["{{base_url}}"], "path": ["api", "upload"] },
+            "description": "Demo question 4. You must attach a file in the Body tab — Postman cannot store one in a shared collection.\n\nReuses the identical job/queue path as /api/ask, so the stream works the same way. Emits a `vision` event first, then the domain feeds the same search loop."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 400) {",
+                  "  console.log('Attach a file to the `image` form field in the Body tab.');",
+                  "} else {",
+                  "  pm.test('200', () => pm.response.to.have.status(200));",
+                  "  const r = pm.response.json();",
+                  "  pm.test('validated the image', () => pm.expect(r.image.format).to.be.a('string'));",
+                  "  pm.collectionVariables.set('job_id', r.job_id);",
+                  "  pm.collectionVariables.set('session_id', r.session_id);",
+                  "  console.log('image:', r.image.format, r.image.width + 'x' + r.image.height);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Upload via base64 (no file needed)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"question\": \"Did anyone click this?\",\n  \"image_base64\": \"iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mP8z8BQz0AEYBxVSF+FABJADveWkH6oAAAAAElFTkSuQmCC\"\n}"
+            },
+            "url": { "raw": "{{base_url}}/api/upload", "host": ["{{base_url}}"], "path": ["api", "upload"] },
+            "description": "Same path, no file picker required — the embedded base64 is a tiny valid PNG, so this request runs as-is.\n\nA `data:image/png;base64,...` prefix is tolerated."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "pm.test('accepted base64 image', () => pm.expect(r.job_id).to.be.a('string'));",
+                  "pm.collectionVariables.set('job_id', r.job_id);",
+                  "console.log('job:', r.job_id.slice(0,8), '| image:', JSON.stringify(r.image));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "5. Demo Escape Hatch (replay)",
+      "item": [
+        {
+          "name": "Replay status",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/replay", "host": ["{{base_url}}"], "path": ["api", "replay"] },
+            "description": "Lists cached runs. `enabled` reflects DEMO_REPLAY, which is read at boot — flipping it requires a restart."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "console.log('enabled:', r.enabled, '| cached runs:', r.cached_runs);",
+                  "console.log('questions:', JSON.stringify(r.questions));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Record current job to cache",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"job_id\": \"{{job_id}}\"\n}" },
+            "url": { "raw": "{{base_url}}/api/replay/record", "host": ["{{base_url}}"], "path": ["api", "replay", "record"] },
+            "description": "Captures a good run into demo_cache.json during rehearsal, so the escape hatch exists without hand-editing JSON.\n\nOnly `done` jobs are cacheable — recording a half-finished run would replay a broken demo. Restart with DEMO_REPLAY=1 to serve it."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 400) {",
+                  "  console.log('Job is not done yet — wait a few seconds and re-send.');",
+                  "} else {",
+                  "  pm.test('200', () => pm.response.to.have.status(200));",
+                  "  const r = pm.response.json();",
+                  "  pm.test('recorded', () => pm.expect(r.recorded).to.be.true);",
+                  "  console.log('cached', r.events, 'events for:', r.question);",
+                  "}"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "6. Error Handling",
+      "item": [
+        {
+          "name": "Ask with no question → 400",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": { "raw": "{{base_url}}/api/ask", "host": ["{{base_url}}"], "path": ["api", "ask"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('JSON error, never an HTML traceback', () => {",
+                  "  pm.expect(pm.response.json().error).to.be.a('string');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unknown job → 404",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/job/deadbeef", "host": ["{{base_url}}"], "path": ["api", "job", "deadbeef"] }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "pm.test('JSON error body', () => pm.expect(pm.response.json().error).to.eql('unknown job_id'));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Timeline with no anchor → 400",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" },
+            "url": { "raw": "{{base_url}}/api/timeline", "host": ["{{base_url}}"], "path": ["api", "timeline"] },
+            "description": "A fresh session has no findings, so there is no anchor to resolve. Fails clearly rather than guessing."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "console.log(pm.response.json().error);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Corrupt image → 400",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"image_base64\": \"bm90IGFuIGltYWdl\"\n}" },
+            "url": { "raw": "{{base_url}}/api/upload", "host": ["{{base_url}}"], "path": ["api", "upload"] },
+            "description": "Valid base64, but not image bytes. Must fail here with a clear message rather than deep inside the vision model mid-demo."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('400', () => pm.response.to.have.status(400));",
+                  "pm.test('says it is not an image', () => {",
+                  "  pm.expect(pm.response.json().error).to.eql('not a valid image');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Unknown route → 404 JSON",
+          "request": {
+            "method": "GET",
+            "url": { "raw": "{{base_url}}/api/does-not-exist", "host": ["{{base_url}}"], "path": ["api", "does-not-exist"] },
+            "description": "Confirms the global handler returns JSON, never Flask's HTML traceback page."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('404', () => pm.response.to.have.status(404));",
+                  "pm.test('body is JSON not HTML', () => {",
+                  "  pm.expect(pm.response.headers.get('Content-Type')).to.include('application/json');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "7. Admin",
+      "item": [
+        {
+          "name": "Sweep finished jobs",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/api/admin/sweep?max_age=0",
+              "host": ["{{base_url}}"],
+              "path": ["api", "admin", "sweep"],
+              "query": [{ "key": "max_age", "value": "0", "description": "seconds; 0 sweeps every finished job" }]
+            },
+            "description": "Drops finished jobs so a long demo session does not grow unbounded. Running jobs are never swept."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200', () => pm.response.to.have.status(200));",
+                  "const r = pm.response.json();",
+                  "console.log('swept', r.swept, '| remaining', r.remaining);"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
