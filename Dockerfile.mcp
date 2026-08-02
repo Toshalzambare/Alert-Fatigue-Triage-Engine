@@ -7,13 +7,13 @@ COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy necessary directories
-COPY mcp/ mcp/
+COPY mcp/ mcp_server/
 COPY .env .
 
 # Expose port
 EXPOSE 8000
 
-ENV PYTHONPATH="/app/mcp"
+ENV PYTHONPATH="/app/mcp_server"
 
 # Run the MCP server in HTTP mode
-CMD ["python", "mcp/server.py", "--http"]
+CMD ["python", "mcp_server/server.py", "--http"]
