@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { efficiencyLine } from "../lib/runState";
+import { efficiencyLine, triageEntities } from "../lib/runState";
 
 /* The reasoning trace. This pane is the product.
  *
@@ -27,8 +27,8 @@ function EsQuery({ query }) {
   );
 }
 
-function Efficiency({ meta, tool }) {
-  const e = efficiencyLine(meta, tool);
+function Efficiency({ meta }) {
+  const e = efficiencyLine(meta);
   return (
     <p className="eff mono">
       <span className="eff-primary">{e.primary}</span>
@@ -74,12 +74,14 @@ function Hop({ hop, isLast }) {
     <li className="hop">
       <article className={`hop-card ${healed ? "healed" : ""}`}>
         <header className="hop-head">
-          <span className="hop-n mono">Hop {hop.n}</span>
+          <span className="hop-n mono">Hop {hop.label}</span>
           <span className="hop-tool mono">{hop.tool}</span>
-          {!hop.result && <span className="hop-wait" aria-label="Running" />}
+          {!hop.result && !hop.healing.length && (
+            <span className="hop-wait" aria-label="Running" />
+          )}
         </header>
 
-        {hop.args && (
+        {hop.args && Object.keys(hop.args).length > 0 && (
           <p className="hop-args mono">
             {Object.entries(hop.args)
               .filter(([, v]) => v !== null && v !== undefined && v !== "")
@@ -88,20 +90,26 @@ function Hop({ hop, isLast }) {
           </p>
         )}
 
-        {empty && <p className="hop-empty">No results</p>}
+        {settled?.meta?.error && (
+          <p className="hop-empty">{settled.meta.error}</p>
+        )}
+        {empty && !settled?.meta?.error && <p className="hop-empty">No results</p>}
         <Healing items={hop.healing} />
 
         {settled?.meta && (
           <>
-            <Efficiency meta={settled.meta} tool={hop.tool} />
+            <Efficiency meta={settled.meta} />
             <EsQuery query={settled.meta.es_query} />
           </>
         )}
       </article>
 
       {/* The connector reason is the proof of autonomy: the agent chose the
-          next step and said why. */}
-      {hop.reason && !isLast && (
+          next step and said why. Rendered whenever a reason exists, including
+          on the last card - a stated pivot that did not complete is still
+          information, and hiding it would make a failed run look like a
+          deliberate stop. */}
+      {hop.reason && (
         <p className="hop-reason">
           <span className="hop-reason-rule" aria-hidden="true" />
           {hop.reason}
@@ -136,13 +144,12 @@ export default function Trace({ run, scrollRef }) {
         {run.triage && (
           <div className="triage">
             <span className="eyebrow">Triage</span>
-            <p className="mono">
-              intent={run.triage.intent}
-              {run.triage.entities &&
-                Object.entries(run.triage.entities).map(([k, v]) => (
-                  <span key={k}>{`  ${k}=${v}`}</span>
-                ))}
-            </p>
+            <p className="mono">intent={run.triage.intent}</p>
+            {triageEntities(run.triage.entities).map((e, i) => (
+              <p key={i} className="triage-entity">
+                {e}
+              </p>
+            ))}
           </div>
         )}
 
@@ -184,11 +191,16 @@ export default function Trace({ run, scrollRef }) {
 
         <ol className="hops">
           {run.hops.map((h, i) => (
-            <Hop key={`${h.tool}-${h.n}-${i}`} hop={h} isLast={i === run.hops.length - 1} />
+            <Hop key={`${h.tool}-${h.n}-${i}`} hop={h} />
           ))}
         </ol>
 
-        {run.error && <p className="trace-error">{run.error}</p>}
+        {run.error && (
+          <p className="trace-error">
+            <span className="trace-error-bar" aria-hidden="true" />
+            {run.error}
+          </p>
+        )}
       </div>
     </section>
   );

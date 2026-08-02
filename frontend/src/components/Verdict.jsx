@@ -1,5 +1,6 @@
 import { useState } from "react";
 import * as api from "../lib/api";
+import { normalizeSeverity, verdictFindings } from "../lib/runState";
 
 /* The verdict card, plus the two actions that hang off it.
  *
@@ -35,7 +36,9 @@ function Timeline({ data, onClose }) {
               <span className="tl-text">{e["event.action"] || e.message}</span>
             </p>
           ))}
-          <p className="tl-note">Routine activity</p>
+          <p className="tl-note">
+            {before.length ? "Routine activity" : "Nothing logged"}
+          </p>
         </section>
 
         <section className="tl-col loud">
@@ -118,8 +121,15 @@ export default function Verdict({ verdict, streamed }) {
     setBusy(kind);
     setErr(null);
     try {
-      const res = kind === "timeline" ? await api.timeline() : await api.forgeSigma();
-      setData(kind === "timeline" ? res.data : res);
+      if (kind === "timeline") {
+        const res = await api.timeline();
+        // MCP never raises; a failure arrives as an empty envelope with
+        // meta.error, so check that rather than trusting the 200.
+        if (res.meta?.error) throw new Error(res.meta.error);
+        setData(res.data);
+      } else {
+        setData(await api.forgeSigma({ findings: verdictFindings(verdict) }));
+      }
       setPanel(kind);
     } catch (e) {
       setErr(e.message);
@@ -143,16 +153,23 @@ export default function Verdict({ verdict, streamed }) {
     );
   }
 
-  const sev = verdict.severity || "medium";
+  const sev = normalizeSeverity(verdict.severity);
+  const findings = verdictFindings(verdict);
+  // Timeline needs an anchor. The backend falls back to session findings, so
+  // only disable when we know there is nothing to anchor on.
+  const canTimeline = !findings || Boolean(findings.anchor_timestamp);
+
+  // Prefer the streamed narration: `summary` is a truncated prefix of it.
+  const body = streamed?.trim() || verdict.summary;
 
   return (
     <div className="verdict">
       <header className="verdict-head">
-        <span className={`sev sev-${sev}`}>{sev}</span>
+        <span className={`sev sev-${sev}`}>{verdict.severity || sev}</span>
         <span className="eyebrow">Assessment</span>
       </header>
 
-      <p className="verdict-summary">{verdict.summary}</p>
+      <p className="verdict-summary">{body}</p>
 
       {verdict.iocs?.length > 0 && (
         <div className="iocs">
@@ -171,15 +188,16 @@ export default function Verdict({ verdict, streamed }) {
         <button
           className="btn-ghost sm"
           onClick={() => open("timeline")}
-          disabled={busy}
+          disabled={Boolean(busy) || !canTimeline}
           aria-pressed={panel === "timeline"}
+          title={canTimeline ? undefined : "No incident timestamp in this run"}
         >
           {busy === "timeline" ? "Loading…" : "Inspect timeline"}
         </button>
         <button
           className="btn-ghost sm"
           onClick={() => open("sigma")}
-          disabled={busy}
+          disabled={Boolean(busy)}
           aria-pressed={panel === "sigma"}
         >
           {busy === "sigma" ? "Forging…" : "Forge detection rule"}

@@ -13,6 +13,7 @@ const SUGGESTED = [
 
 export default function Console({ onExit }) {
   const [question, setQuestion] = useState("");
+  const [asked, setAsked] = useState(null); // the question this run is answering
   const [run, setRun] = useState(emptyRun);
   const [status, setStatus] = useState(null);
   const [file, setFile] = useState(null);
@@ -22,11 +23,31 @@ export default function Console({ onExit }) {
   const abortRef = useRef(null);
   const inputRef = useRef(null);
 
+  // Object URLs leak unless revoked, and calling createObjectURL inline would
+  // mint a fresh one on every render - once per streamed token.
+  const [preview, setPreview] = useState(null);
   useEffect(() => {
-    api
-      .health()
-      .then(setStatus)
-      .catch(() => setStatus({ unreachable: true }));
+    if (!file) return setPreview(null);
+    const url = URL.createObjectURL(file);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  // Poll health so a worker or MCP server dying mid-session is visible in the
+  // header rather than showing up as a run that never produces events.
+  useEffect(() => {
+    let alive = true;
+    const check = () =>
+      api
+        .health()
+        .then((h) => alive && setStatus(h))
+        .catch(() => alive && setStatus({ unreachable: true }));
+    check();
+    const id = setInterval(check, 15000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
   }, []);
 
   // Auto-scroll the trace as hops arrive, so the newest card stays visible
@@ -45,6 +66,8 @@ export default function Console({ onExit }) {
     abortRef.current = ctrl;
 
     setRun({ ...emptyRun, status: "running" });
+    setAsked(q || "Did anyone click this?");
+    setFile(image ?? null); // a text-only run must not show a stale thumbnail
     setQuestion("");
 
     const onEvent = (ev) => setRun((r) => reduceEvent(r, ev));
@@ -57,11 +80,15 @@ export default function Console({ onExit }) {
       }
       setRun((r) => (r.status === "running" ? { ...r, status: "done" } : r));
     } catch (e) {
-      if (e.name === "AbortError") return;
-      setRun((r) => ({ ...r, status: "error", error: e.message }));
-    } finally {
-      setFile(null);
+      if (e.name === "AbortError" || ctrl.signal.aborted) return;
+      const detail = e.detail ? ` — ${e.detail}` : "";
+      setRun((r) => ({ ...r, status: "error", error: e.message + detail }));
     }
+  }
+
+  function stop() {
+    abortRef.current?.abort();
+    setRun((r) => ({ ...r, status: "done" }));
   }
 
   function onDrop(e) {
@@ -74,7 +101,8 @@ export default function Console({ onExit }) {
     }
   }
 
-  const asked = run.status !== "idle";
+  const started = run.status !== "idle";
+  const running = run.status === "running";
 
   return (
     <div className="console">
@@ -89,11 +117,15 @@ export default function Console({ onExit }) {
             <span className="c-badge err">Backend unreachable</span>
           ) : status ? (
             <>
-              <span className="mono c-mode">{status.config?.mode}</span>
-              {status.degraded?.length > 0 && (
-                <span className="c-badge">
-                  {status.degraded.join(" · ")} stubbed
+              <span className="mono c-mode">
+                {status.subsystems?.llm?.provider ?? "unknown"}
+              </span>
+              {status.degraded?.length > 0 ? (
+                <span className="c-badge err" title="These subsystems are down">
+                  {status.degraded.join(" · ")} down
                 </span>
+              ) : (
+                <span className="c-badge ok">all systems ready</span>
               )}
             </>
           ) : null}
@@ -111,7 +143,7 @@ export default function Console({ onExit }) {
       >
         {/* --------------------------------------------------- left pane --- */}
         <section className="c-chat" aria-label="Analyst console">
-          {!asked && (
+          {!started && (
             <div className="c-empty">
               <h1>What do you want to know?</h1>
               <p className="c-empty-sub">
@@ -128,20 +160,34 @@ export default function Console({ onExit }) {
             </div>
           )}
 
-          {asked && (
+          {started && (
             <div className="c-thread">
-              {file && (
+              <p className="c-asked">{asked}</p>
+
+              {file && preview && (
                 <figure className="c-upload">
-                  <img src={URL.createObjectURL(file)} alt="Uploaded screenshot" />
+                  <img src={preview} alt="Uploaded screenshot" />
                   <figcaption className="mono">{file.name}</figcaption>
                 </figure>
               )}
+
               <VerdictCard verdict={run.verdict} streamed={run.tokens} />
-              {run.status === "running" && !run.tokens && !run.verdict && (
+
+              {running && !run.tokens && !run.verdict && (
                 <p className="c-working">
                   <span className="live" aria-hidden="true" />
                   Investigating
+                  <button className="c-stop" onClick={stop}>
+                    Stop
+                  </button>
                 </p>
+              )}
+
+              {run.status === "error" && !run.verdict && (
+                <div className="c-failed">
+                  <span className="eyebrow">Run failed</span>
+                  <p>{run.error}</p>
+                </div>
               )}
             </div>
           )}
@@ -159,7 +205,7 @@ export default function Console({ onExit }) {
               onChange={(e) => setQuestion(e.target.value)}
               placeholder="Ask about your logs"
               aria-label="Your question"
-              disabled={run.status === "running"}
+              disabled={running}
             />
             <label className="c-attach" title="Attach a screenshot">
               <input
@@ -179,7 +225,7 @@ export default function Console({ onExit }) {
             <button
               className="btn-primary sm"
               type="submit"
-              disabled={run.status === "running" || !question.trim()}
+              disabled={running || !question.trim()}
             >
               Ask
             </button>
