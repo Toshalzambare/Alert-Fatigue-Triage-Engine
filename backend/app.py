@@ -1,98 +1,109 @@
 """Flask service layer - transport, session, orchestration. No business logic.
 
-Plan 05, all phases:
-  Phase 0  /api/health                  the integration dashboard
-  Phase 1  /api/ask + /api/stream       the streaming path
-  Phase 2  agent_bridge                 D's graph behind one function
-  Phase 3  /api/upload /timeline /sigma the remaining routes
-  Phase 4  config.py + run.sh           one-command startup
-  Phase 5  DEMO_REPLAY + warm-up        demo-day hardening
+Every reasoning decision belongs to the agent (Agent/graph.py); every Elastic
+query belongs to MCP (mcp/tools/impl.py). If there is an ES query or a prompt in
+this file, it is in the wrong module.
 
-Every reasoning decision belongs to Teammate D, every query to Teammate C. If
-there's an ES query or a prompt in this file, it's in the wrong plan.
+Architecture
+------------
+    browser ──HTTP──► Flask ──enqueue──► Redis ──► Celery worker ──► LangGraph
+       ▲                                                                │
+       └──────────── SSE ◄── Redis pub/sub ◄──── emit(event) ◄──────────┘
+
+Flask never runs the agent. It enqueues a task and streams the events the worker
+publishes, which is what lets the API scale independently of inference capacity.
 """
 import base64
 import io
 import json
 import logging
-import queue
-import threading
 import time
+import uuid
 
 from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
-import agent_bridge
+import celery_app as bus
 import config
+import llm
 import mcp_client
-import replay
-import sigma
-from session import SENTINEL, STORE
+from tasks import forge_sigma, run_agent
 
 logging.basicConfig(
     level=logging.DEBUG if config.DEBUG else logging.INFO,
     format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
 )
 log = logging.getLogger("backend")
-# urllib3 logs a line per MCP probe; at DEBUG that buries our own output.
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = config.MAX_UPLOAD_MB * 1024 * 1024
-
-# Vite dev server is a different origin; the browser needs CORS to reach us.
 CORS(app, resources={r"/api/*": {"origins": config.CORS_ORIGINS}})
 
 BOOT_TIME = time.time()
 
-
-# ---------------------------------------------------------------- probes ---
-def probe_es() -> dict:
-    """Teammate B's Elastic Cloud. Credentials come from the root .env."""
-    if not (config.ELASTIC_URL and config.ELASTIC_API_KEY):
-        return {"status": "not_configured",
-                "detail": f"ELASTIC_URL / ELASTIC_API_KEY unset in {config.ENV_PATH}"}
-    host = config.ELASTIC_URL.split("//")[-1].split(":")[0]
-    return {"status": "configured", "index": config.ES_INDEX, "host": host,
-            "detail": "credentials present; queries go through MCP, not Flask"}
+# Session state: the last findings, so /api/timeline and /api/sigma know what we
+# just found without an NL round-trip. Lives in Redis rather than a dict so it
+# survives a web restart and is shared across web processes.
+SESSION_TTL_S = 86400
 
 
-def probe_mcp() -> dict:
-    """Teammate C's FastMCP server."""
-    reachable = mcp_client.available()
-    return {
-        "status": "ok" if reachable else "stub",
-        "mode": config.MCP_MODE,
-        "url": config.MCP_URL,
-        "detail": None if reachable else "serving contract-shaped stub data",
-    }
+def session_key(sid: str) -> str:
+    return f"session:{sid}"
 
 
-def probe_agent() -> dict:
-    """Teammate D's graph. Gemma is hosted (OpenRouter), so "configured" means
-    an API key is present rather than a model being resident in VRAM."""
-    backend = agent_bridge.active_backend()
-    return {
-        "status": "ok" if backend == "live" else backend,
-        "backend": backend,
-        "model": config.GEMMA_MODEL,
-        "api_key_present": bool(config.GEMMA_API_KEY),
-    }
+def get_session(sid: str | None) -> tuple[str, dict]:
+    """Fetch or mint. An unknown id silently creates a new session - a demo
+    should never 404 because a browser tab was refreshed."""
+    sid = sid or uuid.uuid4().hex
+    raw = bus.redis().get(session_key(sid))
+    return sid, (json.loads(raw) if raw else {})
+
+
+def save_session(sid: str, data: dict) -> None:
+    bus.redis().setex(session_key(sid), SESSION_TTL_S, json.dumps(data))
 
 
 # ---------------------------------------------------------------- health ---
 @app.get("/api/health")
 def health():
-    """The integration dashboard. When someone says "it's broken", this says
-    which of the four subsystems is actually down, in one second, instead of
-    four people guessing."""
+    """The integration dashboard. Says which subsystem is down in one second,
+    instead of four people guessing."""
+    broker_up = bus.broker_available()
+    workers = bus.workers_online() if broker_up else 0
+    mcp_up = mcp_client.available()
+    llm_status = llm.status()
+
     subsystems = {
-        "elastic": probe_es(),
-        "mcp": probe_mcp(),
-        "agent": probe_agent(),
+        "elastic": (
+            {"status": "configured", "index": config.ES_INDEX,
+             "detail": "queried through MCP, not Flask"}
+            if config.ELASTIC_URL and config.ELASTIC_API_KEY
+            else {"status": "not_configured",
+                  "detail": f"ELASTIC_URL / ELASTIC_API_KEY unset in {config.ENV_PATH}"}
+        ),
+        "mcp": {
+            "status": "ok" if mcp_up else "down",
+            "url": config.MCP_URL,
+            "detail": None if mcp_up else "start it: python mcp/server.py",
+        },
+        "llm": llm_status,
+        "broker": {
+            "status": "ok" if broker_up else "down",
+            "url": config.REDIS_URL,
+            "detail": None if broker_up else "start it: redis-server",
+        },
+        "workers": {
+            "status": "ok" if workers else "down",
+            "online": workers,
+            "detail": None if workers else "start one: celery -A tasks worker",
+        },
         "backend": {"status": "ok"},
     }
-    degraded = [k for k, v in subsystems.items() if v["status"] not in ("ok", "configured")]
+
+    degraded = [k for k, v in subsystems.items()
+                if v["status"] not in ("ok", "configured")]
+
     return jsonify({
         "ok": True,
         "ready": not degraded,
@@ -100,95 +111,51 @@ def health():
         "uptime_s": round(time.time() - BOOT_TIME, 1),
         "subsystems": subsystems,
         "config": config.summary(),
-        "replay": replay.available() if config.DEMO_REPLAY else {"enabled": False},
-        "jobs": STORE.job_count(),
-        "sessions": STORE.session_count(),
     })
 
 
-# ------------------------------------------------------------ agent runner ---
-def run_agent(job_id: str, payload: dict) -> None:
-    """Worker thread body. Wrapped in try/except with SENTINEL in finally -
-    an unhandled exception here is invisible in Flask's console and looks
-    exactly like a hung UI. Plan 05 calls this the #1 way a live demo dies."""
-    job = STORE.get_job(job_id)
-    if job is None:
-        return
-
-    try:
-        result = agent_bridge.run(
-            payload.get("question", ""),
-            emit=job.emit,
-            image=payload.get("image"),
-        )
-        job.result = result
-        job.status = "done"
-
-        # Carry findings onto the session so /api/timeline and /api/sigma know
-        # what we just found, without an NL round-trip.
-        sess = STORE.get_session(job.session_id)
-        if result.get("findings"):
-            sess.findings = result["findings"]
-        if result.get("verdict"):
-            sess.last_verdict = result["verdict"]
-        sess.tool_calls.extend(
-            e for e in job.events if e.get("type") in ("tool_call", "tool_result")
-        )
-        job.emit({"type": "done", "job_id": job_id})
-    except Exception as exc:  # noqa: BLE001 - a demo must never surface a traceback
-        job.status = "error"
-        job.error = str(exc)
-        log.exception("agent failed job=%s", job_id)
-        job.emit({"type": "error", "message": str(exc)})
-    finally:
-        job.close()
-
-
-def _start_job(payload: dict, question: str):
-    sess = STORE.get_session(payload.get("session_id"))
-    job = STORE.create_job(sess.id, question)
-    threading.Thread(
-        target=run_agent, args=(job.id, payload), daemon=True,
-        name=f"agent-{job.id[:8]}",
-    ).start()
-    log.info("job %s started: %r", job.id[:8], question[:60])
-    return job, sess
+# ------------------------------------------------------------------- ask ---
+def _enqueue(question: str, session_id: str | None, image_b64: str | None = None):
+    sid, _ = get_session(session_id)
+    job_id = uuid.uuid4().hex
+    bus.set_state(job_id, status="queued", question=question, session_id=sid)
+    run_agent.delay(job_id, question, image_b64)
+    log.info("job %s queued: %r", job_id[:8], question[:60])
+    return job_id, sid
 
 
 @app.post("/api/ask")
 def ask():
-    """Start an agent run. Returns immediately with a job_id; the caller then
-    opens /api/stream/<job_id> to watch it."""
+    """Enqueue an investigation. Returns immediately; the caller then opens
+    /api/stream/<job_id> to watch it."""
     payload = request.get_json(silent=True) or {}
     question = (payload.get("question") or "").strip()
     if not question:
         return jsonify({"error": "question is required"}), 400
+    if not bus.broker_available():
+        return jsonify({"error": "task broker unavailable", "detail": "redis is down"}), 503
 
-    job, sess = _start_job(payload, question)
-    return jsonify({"job_id": job.id, "session_id": sess.id, "status": "running"})
+    job_id, sid = _enqueue(question, payload.get("session_id"))
+    return jsonify({"job_id": job_id, "session_id": sid, "status": "queued"})
 
 
-# ---------------------------------------------------------------- upload ---
 @app.post("/api/upload")
 def upload():
     """Multimodal entry point. Accepts multipart or base64 JSON, validates the
-    bytes are a real image, then reuses the identical job/queue path as /api/ask.
-
-    Deliberately not a second streaming mechanism - one path, one set of bugs.
-    """
-    question = ""
+    bytes are a real image, then reuses the identical job path as /api/ask."""
     raw: bytes | None = None
+    question = ""
+    session_id = None
 
     if "image" in request.files:
-        fh = request.files["image"]
-        raw = fh.read()
+        raw = request.files["image"].read()
         question = (request.form.get("question") or "").strip()
         session_id = request.form.get("session_id")
     else:
         payload = request.get_json(silent=True) or {}
-        b64 = payload.get("image_base64") or ""
         question = (payload.get("question") or "").strip()
         session_id = payload.get("session_id")
+        b64 = payload.get("image_base64") or ""
         if b64:
             if "," in b64[:64]:  # tolerate a data: URL prefix
                 b64 = b64.split(",", 1)[1]
@@ -200,8 +167,7 @@ def upload():
     if not raw:
         return jsonify({"error": "no image provided (multipart 'image' or 'image_base64')"}), 400
 
-    # Validate it's genuinely an image - a corrupt upload should fail here with
-    # a clear message, not deep inside the vision model mid-demo.
+    # Fail here, with a clear message - not deep inside the vision model mid-demo.
     try:
         from PIL import Image
 
@@ -212,91 +178,11 @@ def upload():
         return jsonify({"error": "not a valid image", "detail": str(exc)}), 400
 
     question = question or "Did anyone click this?"
-    job, sess = _start_job(
-        {"question": question, "image": raw, "session_id": session_id}, question
-    )
+    job_id, sid = _enqueue(question, session_id, base64.b64encode(raw).decode())
     return jsonify({
-        "job_id": job.id, "session_id": sess.id, "status": "running",
-        "image": {"format": fmt, "width": size[0], "height": size[1],
-                  "bytes": len(raw)},
+        "job_id": job_id, "session_id": sid, "status": "queued",
+        "image": {"format": fmt, "width": size[0], "height": size[1], "bytes": len(raw)},
     })
-
-
-# -------------------------------------------------------------- timeline ---
-@app.post("/api/timeline")
-def timeline():
-    """The *Inspect Timeline* button. Bypasses the LLM entirely - calls C's
-    timeline_around() directly and returns JSON. No agent, no streaming, ~200ms.
-
-    Fast and unbreakable is exactly what you want behind a button a judge clicks.
-    """
-    payload = request.get_json(silent=True) or {}
-    sess = STORE.get_session(payload.get("session_id"))
-
-    anchor = payload.get("anchor") or sess.findings.get("anchor_timestamp")
-    host = payload.get("host") or (sess.findings.get("hosts") or [None])[0]
-    if not anchor:
-        return jsonify({"error": "anchor is required (no findings in session yet)"}), 400
-
-    result = mcp_client.call("timeline_around", {
-        "anchor": anchor,
-        "host": host,
-        "ip": payload.get("ip"),
-        "minutes_before": payload.get("minutes_before", 15),
-        "minutes_after": payload.get("minutes_after", 15),
-    })
-    return jsonify({"session_id": sess.id, **result})
-
-
-# ----------------------------------------------------------------- sigma ---
-@app.post("/api/sigma")
-def sigma_forge():
-    """Forge a detection rule from the session's findings, then validate it.
-
-    Streamed, since drafting involves generation - reuses the job/queue path.
-    Pass {"stream": false} for a synchronous response, which is easier to test.
-    """
-    payload = request.get_json(silent=True) or {}
-    sess = STORE.get_session(payload.get("session_id"))
-    findings = payload.get("findings") or sess.findings
-
-    if payload.get("stream") is False:
-        result = sigma.forge(
-            findings,
-            start=payload.get("start", "now-48h"),
-            end=payload.get("end", "now"),
-            rule_yaml=payload.get("rule_yaml"),
-        )
-        return jsonify({"session_id": sess.id, **result})
-
-    job = STORE.create_job(sess.id, "sigma_forge")
-
-    def work():
-        try:
-            job.emit({"type": "sigma_drafting", "findings": findings})
-            result = sigma.forge(
-                findings,
-                start=payload.get("start", "now-48h"),
-                end=payload.get("end", "now"),
-                rule_yaml=payload.get("rule_yaml"),
-            )
-            job.emit({"type": "sigma_rule", "yaml": result["yaml"],
-                      "es_query": result["es_query"]})
-            job.emit({"type": "sigma_validation", "validation": result["validation"],
-                      "headline": result["headline"]})
-            job.result = result
-            job.status = "done"
-            job.emit({"type": "done", "job_id": job.id})
-        except Exception as exc:  # noqa: BLE001
-            job.status = "error"
-            job.error = str(exc)
-            log.exception("sigma forge failed")
-            job.emit({"type": "error", "message": str(exc)})
-        finally:
-            job.close()
-
-    threading.Thread(target=work, daemon=True, name=f"sigma-{job.id[:8]}").start()
-    return jsonify({"job_id": job.id, "session_id": sess.id, "status": "running"})
 
 
 # ---------------------------------------------------------------- stream ---
@@ -306,42 +192,46 @@ def _sse(event: dict) -> str:
 
 @app.get("/api/stream/<job_id>")
 def stream(job_id: str):
-    """SSE. One consumer per job.
+    """SSE, fed by Redis pub/sub.
 
-    Two gotchas, each worth an hour if missed:
+    Replays the backlog first so a browser that subscribes late still receives
+    the early hop cards, then follows the live channel.
+
+    Two details that each cost an hour if missed:
       - X-Accel-Buffering: no, or a proxy buffers and nothing appears until the end.
-      - never q.get() unbounded, or a dead worker hangs the browser forever.
+      - never block unbounded, or a dead worker hangs the browser forever.
     """
-    job = STORE.get_job(job_id)
-    if job is None:
-        return jsonify({"error": "unknown job_id"}), 404
-
     def gen():
-        # Replay anything emitted before this consumer connected - otherwise a
-        # slow browser silently misses the first hop cards.
-        replayed = len(job.events)
-        for ev in job.events[:replayed]:
+        replayed = 0
+        for ev in bus.read_backlog(job_id):
+            replayed = max(replayed, ev.get("seq", 0) + 1)
             yield _sse(ev)
-        if job.status != "running":
-            yield _sse({"type": "eof"})
-            return
+            if ev.get("type") == "eof":
+                return
 
+        pubsub = bus.redis().pubsub(ignore_subscribe_messages=True)
+        pubsub.subscribe(bus.channel(job_id))
         deadline = time.time() + config.STREAM_TIMEOUT_S
-        while True:
-            remaining = deadline - time.time()
-            if remaining <= 0:
-                yield _sse({"type": "timeout", "after_s": config.STREAM_TIMEOUT_S})
-                break
-            try:
-                ev = job.queue.get(timeout=min(config.HEARTBEAT_S, remaining))
-            except queue.Empty:
-                yield ": keepalive\n\n"  # SSE comment; keeps proxies honest
-                continue
-            if ev is SENTINEL:
-                break
-            if ev.get("seq", 0) >= replayed:  # already replayed above
+        try:
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    yield _sse({"type": "timeout", "after_s": config.STREAM_TIMEOUT_S})
+                    return
+                msg = pubsub.get_message(
+                    timeout=min(config.HEARTBEAT_S, remaining)
+                )
+                if msg is None:
+                    yield ": keepalive\n\n"  # SSE comment; keeps proxies honest
+                    continue
+                ev = json.loads(msg["data"])
+                if ev.get("seq", 0) < replayed:
+                    continue  # already sent in the backlog replay
                 yield _sse(ev)
-        yield _sse({"type": "eof"})
+                if ev.get("type") == "eof":
+                    return
+        finally:
+            pubsub.close()
 
     return Response(
         gen(),
@@ -356,74 +246,93 @@ def stream(job_id: str):
 
 @app.get("/api/events/<job_id>")
 def events_polling(job_id: str):
-    """Polling fallback (plan 05's option 3) for when SSE misbehaves - less
-    elegant, never fails. ?since=N returns everything at or after sequence N."""
-    job = STORE.get_job(job_id)
-    if job is None:
-        return jsonify({"error": "unknown job_id"}), 404
+    """Polling fallback for when SSE misbehaves - less elegant, never fails.
+    ?since=N returns everything at or after sequence N."""
     since = request.args.get("since", default=0, type=int)
-    pending = [e for e in job.events if e.get("seq", 0) >= since]
+    events = bus.read_backlog(job_id, since=since)
+    state = bus.get_state(job_id)
+    if not events and not state:
+        return jsonify({"error": "unknown job_id"}), 404
     return jsonify({
-        "events": pending, "next_since": len(job.events), "status": job.status,
+        "events": events,
+        "next_since": since + len(events),
+        "status": state.get("status", "unknown"),
     })
 
 
 @app.get("/api/job/<job_id>")
 def job_status(job_id: str):
-    job = STORE.get_job(job_id)
-    if job is None:
+    state = bus.get_state(job_id)
+    if not state:
         return jsonify({"error": "unknown job_id"}), 404
     return jsonify({
-        "job_id": job.id, "session_id": job.session_id, "status": job.status,
-        "question": job.question, "event_count": len(job.events),
-        "result": job.result, "error": job.error,
+        "job_id": job_id,
+        "status": state.get("status"),
+        "question": state.get("question"),
+        "event_count": len(bus.read_backlog(job_id)),
+        "result": state.get("result"),
+        "error": state.get("error"),
     })
 
 
 @app.get("/api/session/<session_id>")
 def session_state(session_id: str):
-    """What the analyst has found so far. Timeline and Sigma read this."""
-    sess = STORE.get_session(session_id)
-    return jsonify({
-        "session_id": sess.id, "findings": sess.findings,
-        "last_verdict": sess.last_verdict, "tool_calls": len(sess.tool_calls),
-    })
+    sid, data = get_session(session_id)
+    return jsonify({"session_id": sid, **data})
 
 
-# ---------------------------------------------------------------- replay ---
-@app.get("/api/replay")
-def replay_status():
-    return jsonify({"enabled": config.DEMO_REPLAY, **replay.available()})
-
-
-@app.post("/api/replay/record")
-def replay_record():
-    """Capture a good live run into demo_cache.json during rehearsal, so the
-    escape hatch exists without hand-editing JSON."""
+# -------------------------------------------------------------- timeline ---
+@app.post("/api/timeline")
+def timeline():
+    """The *Inspect Timeline* button. Bypasses the LLM entirely - straight to
+    MCP, ~200ms. Fast and unbreakable is what you want behind a button a judge
+    clicks."""
     payload = request.get_json(silent=True) or {}
-    job_id = payload.get("job_id")
-    job = STORE.get_job(job_id) if job_id else None
-    if job is None:
-        return jsonify({"error": "unknown or missing job_id"}), 404
-    if job.status != "done":
-        return jsonify({"error": f"job is {job.status}, only 'done' runs are cacheable"}), 400
-    info = replay.record(
-        job.question,
-        [e for e in job.events if e.get("type") not in ("done", "eof")],
-        (job.result or {}).get("findings", {}),
-    )
-    return jsonify({"recorded": True, "question": job.question, **info})
+    sid, sess = get_session(payload.get("session_id"))
+    findings = sess.get("findings", {})
+
+    anchor = payload.get("anchor") or findings.get("anchor_timestamp")
+    host = payload.get("host") or (findings.get("hosts") or [None])[0]
+    if not anchor:
+        return jsonify({"error": "anchor is required (no findings in session yet)"}), 400
+
+    result = mcp_client.call("timeline_around", {
+        "anchor": anchor,
+        "timestamp": anchor,
+        "host": host,
+        "ip": payload.get("ip"),
+        "minutes_before": payload.get("minutes_before", 15),
+        "minutes_after": payload.get("minutes_after", 15),
+    })
+    return jsonify({"session_id": sid, **result})
 
 
-# ----------------------------------------------------------------- admin ---
-@app.post("/api/admin/sweep")
-def admin_sweep():
-    """Drop finished jobs so a long demo session doesn't grow unbounded."""
-    removed = STORE.sweep(max_age_s=request.args.get("max_age", 3600, type=int))
-    return jsonify({"swept": removed, "remaining": STORE.job_count()})
+# ----------------------------------------------------------------- sigma ---
+@app.post("/api/sigma")
+def sigma_forge():
+    """Forge a detection rule from the session's findings, then validate it.
+
+    Streamed by default (it involves generation); pass {"stream": false} for a
+    synchronous response, which is easier to test.
+    """
+    payload = request.get_json(silent=True) or {}
+    sid, sess = get_session(payload.get("session_id"))
+    findings = payload.get("findings") or sess.get("findings", {})
+    start = payload.get("start", "now-48h")
+    end = payload.get("end", "now")
+
+    if payload.get("stream") is False:
+        import sigma
+
+        return jsonify({"session_id": sid, **sigma.forge(findings, start=start, end=end)})
+
+    job_id = uuid.uuid4().hex
+    bus.set_state(job_id, status="queued", question="sigma_forge", session_id=sid)
+    forge_sigma.delay(job_id, findings, start, end)
+    return jsonify({"job_id": job_id, "session_id": sid, "status": "queued"})
 
 
-# ----------------------------------------------------------------- errors ---
+# ---------------------------------------------------------------- errors ---
 @app.errorhandler(404)
 def not_found(_e):
     return jsonify({"error": "not found"}), 404
@@ -436,22 +345,22 @@ def too_large(_e):
 
 @app.errorhandler(Exception)
 def catch_all(e):
-    """Always JSON, never Flask's HTML traceback page (plan 05 Phase 5)."""
+    """Always JSON, never Flask's HTML traceback page."""
     log.exception("unhandled error")
     return jsonify({"error": type(e).__name__, "message": str(e)}), 500
 
 
 def boot() -> None:
+    llm.apply_env()
     log.info("booting on http://%s:%s", config.HOST, config.PORT)
-    log.info("mode=%s  agent=%s  mcp=%s",
-             config.mode(), agent_bridge.active_backend(), config.MCP_URL)
-    agent_bridge.warm_up()
+    log.info("  llm    : %s", llm.active_provider())
+    log.info("  mcp    : %s", config.MCP_URL)
+    log.info("  broker : %s", config.REDIS_URL)
 
 
 if __name__ == "__main__":
     boot()
-    # threaded=True is required: the agent runs in a worker thread while the SSE
-    # route drains its queue. Single-threaded Flask would freeze the browser for
-    # the whole run and render the trace all at once at the end.
+    # threaded=True is still required: each SSE connection holds a worker thread
+    # for the life of the stream, even though the agent now runs in Celery.
     app.run(host=config.HOST, port=config.PORT, debug=config.DEBUG,
             threaded=True, use_reloader=False)

@@ -193,9 +193,21 @@ def run_http():
     uvicorn.run(http_app, host="127.0.0.1", port=8000, log_level="info")
 
 if __name__ == "__main__":
-    # Start HTTP bridge in background thread
-    http_thread = threading.Thread(target=run_http, daemon=True)
-    http_thread.start()
+    import sys
 
-    # Run FastMCP stdio server
-    mcp.run()
+    # `--http` runs the bridge on the main thread and nothing else.
+    #
+    # The default mode puts the bridge on a daemon thread and gives the main
+    # thread to mcp.run(), which speaks stdio. That is correct when an MCP
+    # client owns the process, but when the server is launched in the
+    # background its stdin is closed immediately, mcp.run() sees EOF and
+    # returns, and the daemon thread dies with the interpreter - so the HTTP
+    # bridge vanishes a moment after it logs that it started.
+    #
+    # The Flask backend only ever needs the bridge, so it launches with --http.
+    if "--http" in sys.argv:
+        run_http()
+    else:
+        http_thread = threading.Thread(target=run_http, daemon=True)
+        http_thread.start()
+        mcp.run()
