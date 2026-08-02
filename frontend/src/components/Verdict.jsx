@@ -1,6 +1,7 @@
 import { useState } from "react";
 import * as api from "../lib/api";
 import { normalizeSeverity, verdictFindings } from "../lib/runState";
+import Markdown from "./Markdown";
 
 /* The verdict card, plus the two actions that hang off it.
  *
@@ -145,10 +146,8 @@ export default function Verdict({ verdict, streamed }) {
     return (
       <div className="verdict streaming">
         <span className="eyebrow">Assessment</span>
-        <p className="verdict-summary">
-          {streamed}
-          <span className="caret" aria-hidden="true" />
-        </p>
+        <Markdown text={streamed} className="verdict-body" />
+        <span className="caret" aria-hidden="true" />
       </div>
     );
   }
@@ -159,8 +158,10 @@ export default function Verdict({ verdict, streamed }) {
   // only disable when we know there is nothing to anchor on.
   const canTimeline = !findings || Boolean(findings.anchor_timestamp);
 
-  // Prefer the streamed narration: `summary` is a truncated prefix of it.
-  const body = streamed?.trim() || verdict.summary;
+  // Prefer the streamed narration. `summary` is a truncated prefix of the same
+  // text (the agent cuts it at 200 chars and appends an ellipsis), so using it
+  // when the full text is in hand would throw away most of the assessment.
+  const body = streamed?.trim() || verdict.summary || "";
 
   return (
     <div className="verdict">
@@ -169,7 +170,7 @@ export default function Verdict({ verdict, streamed }) {
         <span className="eyebrow">Assessment</span>
       </header>
 
-      <p className="verdict-summary">{body}</p>
+      <Markdown text={body} className="verdict-body" />
 
       {verdict.iocs?.length > 0 && (
         <div className="iocs">

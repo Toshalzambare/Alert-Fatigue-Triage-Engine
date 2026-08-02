@@ -25,3 +25,20 @@ REPORTS — when the analyst asks for a report:
 - "stakeholder report" / "executive summary": Write a non-technical summary. Business impact, risk level (Critical/High/Medium/Low), recommended actions. No raw IPs, no queries, no jargon.
 - "SOC report" / "technical documentation": Full IOC list, MITRE ATT&CK IDs, timeline reconstruction, ES queries used, remediation playbook.
 """
+
+VISION_PROMPT = """The analyst has attached a screenshot and asked:
+
+{question}
+
+Look at the image yourself and report what you actually see - do not guess or
+assume it is a known campaign.
+
+1. State the brand being impersonated, the exact domain in the address bar
+   (character for character - watch for digits substituted for letters, like a
+   zero for the letter o), and any visual red flags.
+2. Then use the tools to check that domain against the logs: who visited it,
+   when, and what happened to those accounts afterwards.
+
+If the image contains no domain, say so plainly and answer the analyst's
+question with the tools you have.
+"""

@@ -181,6 +181,49 @@
   word-break: break-word;
 }
 
+/* ------------------------------------------------- staged attachment --- */
+/* Attaching stages the image; it sends with the next prompt. */
+.c-pending {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin: 0 var(--s-6);
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--ink-600);
+  border-left: 2px solid var(--iris);
+  border-radius: var(--radius);
+  background: var(--ink-800);
+  flex-shrink: 0;
+}
+.c-pending img {
+  width: 34px;
+  height: 34px;
+  object-fit: cover;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.c-pending-name {
+  font-size: var(--t-xs);
+  color: var(--text-hi);
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.c-pending-hint {
+  font-size: var(--t-xs);
+  color: var(--text-faint);
+  margin-right: auto;
+}
+.c-pending-x {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: var(--t-xs);
+  padding: 0;
+}
+.c-pending-x:hover { color: var(--sev-high); }
+
 /* --------------------------------------------------------------- form --- */
 .c-form {
   display: flex;
@@ -289,13 +332,94 @@
   line-height: 1.6;
 }
 
+/* ---------------------------------------------------------- markdown --- */
+/* The agent writes a structured assessment: headings, bullets, and inline
+ * telemetry. Rendering it as one flat paragraph loses the structure that
+ * makes it readable at a glance. */
+.md > *:first-child { margin-top: 0; }
+.md > *:last-child { margin-bottom: 0; }
+
+.md-p {
+  margin: 0 0 var(--s-3);
+  font-size: var(--t-sm);
+  line-height: 1.65;
+  color: var(--text-mid);
+}
+
+.md-h {
+  font-family: var(--font-display);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--text-hi);
+  margin: var(--s-5) 0 var(--s-3);
+  line-height: 1.3;
+}
+.md-h1 { font-size: var(--t-lg); }
+.md-h2 { font-size: var(--t-md); }
+.md-h3,
+.md-h4 {
+  font-size: var(--t-sm);
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-lo);
+}
+
+.md-list {
+  margin: 0 0 var(--s-4);
+  padding: 0;
+  list-style: none;
+}
+.md-list li {
+  position: relative;
+  padding-left: var(--s-4);
+  margin-bottom: var(--s-2);
+  font-size: var(--t-sm);
+  line-height: 1.6;
+  color: var(--text-mid);
+}
+/* A short rule rather than a disc - reads as a data row, not prose. */
+.md-list li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0.72em;
+  width: 6px;
+  height: 1px;
+  background: var(--iris-dim);
+}
+
+.md-list strong,
+.md-p strong {
+  color: var(--text-hi);
+  font-weight: 500;
+}
+
+/* Inline code is how IPs, users, and hostnames read as telemetry. */
+.md-code {
+  background: var(--ink-900);
+  border: 1px solid var(--ink-700);
+  border-radius: 2px;
+  padding: 0.08em 0.35em;
+  font-size: 0.85em;
+  color: var(--find);
+  white-space: nowrap;
+}
+
+.md-rule {
+  border: none;
+  border-top: 1px solid var(--ink-700);
+  margin: var(--s-4) 0;
+}
+
+/* Sits after the streamed markdown block, pulled up onto the last line so it
+ * reads as a cursor rather than a stray mark below the text. */
 .caret {
   display: inline-block;
   width: 7px;
   height: 1.05em;
   background: var(--signal);
-  margin-left: 3px;
   vertical-align: text-bottom;
+  margin-top: calc(var(--s-3) * -1);
   animation: blink 1.1s steps(2) infinite;
 }
 @keyframes blink { 50% { opacity: 0; } }
@@ -496,24 +620,13 @@
   padding: var(--s-4);
   margin-bottom: var(--s-5);
 }
-.vision-grid {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: var(--s-2) var(--s-4);
+.vision-status {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
   margin: var(--s-3) 0 0;
-  font-size: var(--t-xs);
-}
-.vision-grid dt { color: var(--text-faint); }
-.vision-grid dd { margin: 0; color: var(--text-hi); }
-.vision-domain { color: var(--find) !important; }
-.tag-warn {
-  margin-left: var(--s-2);
-  font-family: var(--font-body);
-  font-size: 0.7rem;
-  color: var(--heal);
-  border: 1px solid var(--heal-dim);
-  border-radius: var(--radius);
-  padding: 0.05rem 0.35rem;
+  font-size: var(--t-sm);
+  color: var(--text-hi);
 }
 .vision-next {
   margin: var(--s-3) 0 0;

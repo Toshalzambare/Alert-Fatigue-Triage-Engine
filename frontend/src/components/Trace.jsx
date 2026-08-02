@@ -155,27 +155,16 @@ export default function Trace({ run, scrollRef }) {
 
         {run.vision && (
           <div className="vision">
-            <span className="eyebrow">Vision analysis</span>
-            <dl className="vision-grid">
-              <dt>Brand impersonated</dt>
-              <dd>{run.vision.brand_impersonated}</dd>
-              <dt>Extracted domain</dt>
-              <dd className="mono vision-domain">
-                {run.vision.extracted_domain}
-                {run.vision.typosquat && (
-                  <span className="tag-warn">typosquat</span>
-                )}
-              </dd>
-              {run.vision.red_flags?.length > 0 && (
-                <>
-                  <dt>Red flags</dt>
-                  <dd>{run.vision.red_flags.join(", ")}</dd>
-                </>
-              )}
-            </dl>
-            <p className="vision-next">
-              Searching logs for this domain
+            <span className="eyebrow">Vision</span>
+            {/* The model reads the screenshot itself - nothing is extracted in
+                the UI or the backend, so there are no fields to show here.
+                What it finds appears in the assessment and drives the tool
+                calls below. */}
+            <p className="vision-status">
+              Reading the screenshot
+              <span className="live" aria-hidden="true" />
             </p>
+            <p className="vision-next">Findings feed the same tool loop</p>
           </div>
         )}
 

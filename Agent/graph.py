@@ -1,12 +1,13 @@
 import re
 import json
+import base64
 import requests
 from typing import TypedDict, Annotated, Any
 from langgraph.graph.message import add_messages
 from langgraph.graph import StateGraph, START, END
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, ToolMessage
 
-from prompts import SYSTEM_PROMPT
+from prompts import SYSTEM_PROMPT, VISION_PROMPT
 from gemma_client import get_bound_llm, parse_tool_calls, get_llm
 
 # -----------------------------------------------------------------------------
@@ -69,14 +70,43 @@ def _check_injection(result) -> bool:
 # 3. Nodes
 # -----------------------------------------------------------------------------
 
+def _image_part(image: bytes) -> dict:
+    """Wrap raw image bytes as an OpenAI-style image_url content part.
+
+    The bytes go to Gemma untouched - no OCR, no extraction, no parsing in the
+    backend or the UI. The model reads the screenshot itself and decides what
+    is in it, which is the whole point of using a multimodal model.
+    """
+    mime = "image/png"
+    if image[:3] == b"\xff\xd8\xff":
+        mime = "image/jpeg"
+    elif image[:6] in (b"GIF87a", b"GIF89a"):
+        mime = "image/gif"
+    elif image[:4] == b"RIFF" and image[8:12] == b"WEBP":
+        mime = "image/webp"
+
+    b64 = base64.b64encode(image).decode()
+    return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
+
+
 def triage_node(state: AgentState):
     state["emit"]({"type": "triage", "intent": "investigate", "entities": [state["question"]]})
-    # Multimodal phishing integration
+
+    question = state["question"]
+
     if state["image"]:
-        state["emit"]({"type": "vision", "brand_impersonated": "Unknown", "extracted_domain": "micros0ft-verify.co", "red_flags": ["Zero instead of O"]})
-        state["question"] += " Ensure you check the domain micros0ft-verify.co"
-        
-    return {"messages": [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=state["question"])]}
+        # Hand the model the image plus the analyst's own prompt. It extracts
+        # the domain and brand itself, then feeds whatever it finds into the
+        # same tool loop - vision is a new input modality, not a side feature.
+        state["emit"]({"type": "vision", "status": "analyzing"})
+        content = [
+            {"type": "text", "text": VISION_PROMPT.format(question=question)},
+            _image_part(state["image"]),
+        ]
+        return {"messages": [SystemMessage(content=SYSTEM_PROMPT),
+                             HumanMessage(content=content)]}
+
+    return {"messages": [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=question)]}
 
 def plan_tool_node(state: AgentState):
     llm = get_bound_llm()

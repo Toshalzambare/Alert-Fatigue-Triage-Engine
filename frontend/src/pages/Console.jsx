@@ -16,7 +16,8 @@ export default function Console({ onExit }) {
   const [asked, setAsked] = useState(null); // the question this run is answering
   const [run, setRun] = useState(emptyRun);
   const [status, setStatus] = useState(null);
-  const [file, setFile] = useState(null);
+  const [file, setFile] = useState(null); // image attached to the current run
+  const [pending, setPending] = useState(null); // staged, not yet sent
   const [dragging, setDragging] = useState(false);
 
   const traceRef = useRef(null);
@@ -32,6 +33,14 @@ export default function Console({ onExit }) {
     setPreview(url);
     return () => URL.revokeObjectURL(url);
   }, [file]);
+
+  const [pendingUrl, setPendingUrl] = useState(null);
+  useEffect(() => {
+    if (!pending) return setPendingUrl(null);
+    const url = URL.createObjectURL(pending);
+    setPendingUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [pending]);
 
   // Poll health so a worker or MCP server dying mid-session is visible in the
   // header rather than showing up as a run that never produces events.
@@ -57,8 +66,9 @@ export default function Console({ onExit }) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [run.hops, run.tokens, run.verdict]);
 
-  async function submit(text, image) {
+  async function submit(text, imageOverride) {
     const q = (text ?? question).trim();
+    const image = imageOverride ?? pending;
     if (!q && !image) return;
 
     abortRef.current?.abort();
@@ -66,8 +76,9 @@ export default function Console({ onExit }) {
     abortRef.current = ctrl;
 
     setRun({ ...emptyRun, status: "running" });
-    setAsked(q || "Did anyone click this?");
+    setAsked(q || "What is in this screenshot?");
     setFile(image ?? null); // a text-only run must not show a stale thumbnail
+    setPending(null);
     setQuestion("");
 
     const onEvent = (ev) => setRun((r) => reduceEvent(r, ev));
@@ -91,14 +102,20 @@ export default function Console({ onExit }) {
     setRun((r) => ({ ...r, status: "done" }));
   }
 
+  /* Attaching stages the image rather than sending it. The analyst can then
+   * type a prompt to go with it - "who else clicked this?", "is this our
+   * brand?" - which is the whole point of a multimodal console. */
+  function attach(f) {
+    if (f?.type.startsWith("image/")) {
+      setPending(f);
+      inputRef.current?.focus();
+    }
+  }
+
   function onDrop(e) {
     e.preventDefault();
     setDragging(false);
-    const f = e.dataTransfer.files?.[0];
-    if (f?.type.startsWith("image/")) {
-      setFile(f);
-      submit(question || "Did anyone click this?", f);
-    }
+    attach(e.dataTransfer.files?.[0]);
   }
 
   const started = run.status !== "idle";
@@ -192,6 +209,23 @@ export default function Console({ onExit }) {
             </div>
           )}
 
+          {pending && (
+            <div className="c-pending">
+              <img src={pendingUrl} alt="" />
+              <span className="c-pending-name mono">{pending.name}</span>
+              <span className="c-pending-hint">
+                Add a prompt, or send it on its own
+              </span>
+              <button
+                className="c-pending-x"
+                onClick={() => setPending(null)}
+                aria-label="Remove attachment"
+              >
+                Remove
+              </button>
+            </div>
+          )}
+
           <form
             className="c-form"
             onSubmit={(e) => {
@@ -203,7 +237,9 @@ export default function Console({ onExit }) {
               ref={inputRef}
               value={question}
               onChange={(e) => setQuestion(e.target.value)}
-              placeholder="Ask about your logs"
+              placeholder={
+                pending ? "Ask about this screenshot" : "Ask about your logs"
+              }
               aria-label="Your question"
               disabled={running}
             />
@@ -212,11 +248,8 @@ export default function Console({ onExit }) {
                 type="file"
                 accept="image/*"
                 onChange={(e) => {
-                  const f = e.target.files?.[0];
-                  if (f) {
-                    setFile(f);
-                    submit(question || "Did anyone click this?", f);
-                  }
+                  attach(e.target.files?.[0]);
+                  e.target.value = ""; // re-attaching the same file must fire
                 }}
               />
               <span className="c-clip" aria-hidden="true" />
@@ -225,7 +258,7 @@ export default function Console({ onExit }) {
             <button
               className="btn-primary sm"
               type="submit"
-              disabled={running || !question.trim()}
+              disabled={running || (!question.trim() && !pending)}
             >
               Ask
             </button>
